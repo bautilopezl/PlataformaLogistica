@@ -149,6 +149,7 @@ def servicios(acceso=None, terceros=None, auditoria=None) -> Servicios:
         catalogo=object(),
         envios=FakeEnvios(),
         sincronizacion=FakeSincronizacion(),
+        monitoreo=object(),
     )
 
 
@@ -421,6 +422,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
     from logistica.services.auditoria_service import AuditoriaService
     from logistica.services.catalogo_service import CatalogoService
     from logistica.services.envio_service import EnvioService
+    from logistica.services.monitoreo_service import MonitoreoService
     from logistica.services.sincronizacion_service import SincronizacionService
     from logistica.services.autorizacion import Autorizador
     from logistica.services.health_service import HealthService
@@ -441,6 +443,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         CatalogoService(tx_connections, aut),
         EnvioService(tx_connections, aut),
         SincronizacionService(tx_connections),
+        MonitoreoService(tx_connections, aut),
     )
     sufijo = uuid.uuid4().hex[:8]
     with unit_of_work(tx_connections) as tx:
