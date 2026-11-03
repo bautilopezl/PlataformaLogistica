@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+logs/*.log*
+.pytest_cache/
+dist/
+build/
+
+# Material de trabajo con asistentes de IA (no se publica)
+CLAUDE.md
+AGENTS.md
+Agents.md
+.claude/
+spec/skills/
