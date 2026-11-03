@@ -98,6 +98,9 @@ class Connections:
                     auth=(n.user, n.password),
                     connection_timeout=self._timeout,
                     connection_acquisition_timeout=self._timeout,
+                    # Sin esto, execute_write reintenta hasta 30 s si Neo4j no responde. Los reintentos ya
+                    # los hace la outbox (con espera creciente y registro de la causa): acá se falla rápido.
+                    max_transaction_retry_time=self._timeout,
                 )
             return self._neo4j
 

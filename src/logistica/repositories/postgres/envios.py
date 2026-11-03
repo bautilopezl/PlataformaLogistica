@@ -40,6 +40,19 @@ _ALCANCE = """
 
 
 class EnvioRepository:
+    def existentes(self, tx: Session, ids: list[str]) -> set[str]:
+        """De esos ids, los que existen en PostgreSQL (los envíos nunca se borran físicamente)."""
+        if not ids:
+            return set()
+        rows = tx.execute(
+            text("SELECT id::text FROM envio WHERE id = ANY(CAST(:ids AS uuid[]))"), {"ids": ids}
+        )
+        return set(rows.scalars())
+
+    def ids(self, tx: Session) -> list[uuid.UUID]:
+        """Todos los envíos (para reconstruir la proyección del grafo)."""
+        return list(tx.execute(text("SELECT id FROM envio ORDER BY creado_en, id")).scalars())
+
     def crear(
         self, tx: Session, envio_id: uuid.UUID, codigo: str, d: EnvioDatos, usuario_id: uuid.UUID
     ) -> None:
@@ -65,10 +78,20 @@ class EnvioRepository:
             },
         )
 
-    def obtener(self, tx: Session, envio_id: uuid.UUID, *, bloquear: bool = False) -> EnvioDTO | None:
-        """Con `bloquear`, toma el lock de la fila: las operaciones sobre un mismo envío se serializan."""
+    def obtener(
+        self, tx: Session, envio_id: uuid.UUID, *, bloquear: bool = False, compartir: bool = False
+    ) -> EnvioDTO | None:
+        """Con `bloquear` (FOR UPDATE) las operaciones que MODIFICAN un envío se serializan.
+
+        Con `compartir` (FOR SHARE) se LEE un estado consistente: espera a que termine un cambio en curso
+        y, hasta el fin de la transacción, ningún cambio nuevo puede empezar. Sirve para leer el envío, sus
+        tramos y sus contenedores como una sola foto (en READ COMMITTED cada consulta vería lo último
+        confirmado).
+        """
         if bloquear:
             tx.execute(text("SELECT 1 FROM envio WHERE id = :id FOR UPDATE"), {"id": envio_id})
+        elif compartir:
+            tx.execute(text("SELECT 1 FROM envio WHERE id = :id FOR SHARE"), {"id": envio_id})
         row = tx.execute(text(_SELECT_ENVIO + " WHERE e.id = :id"), {"id": envio_id}).one_or_none()
         return EnvioDTO(*row) if row else None
 

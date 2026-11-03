@@ -145,3 +145,71 @@ def test_asignar_contenedor_bloquea_tambien_el_contenedor():
     from logistica.services.envio_service import EnvioService
 
     assert "obtener(tx, d.contenedor_id, bloquear=True)" in inspect.getsource(EnvioService.asignar_contenedor)
+
+
+def test_dos_trabajadores_simultaneos_se_reparten_la_outbox_sin_repetir(datos):
+    """Fase 3: reclamo con FOR UPDATE SKIP LOCKED desde DOS conexiones reales a la vez."""
+    from sqlalchemy.orm import Session
+
+    from logistica.core.config import load_config
+    from logistica.repositories.connections import Connections
+    from logistica.repositories.postgres.outbox import NEO4J, OutboxRepository
+
+    eventos = [uuid.uuid4() for _ in range(10)]
+    with psycopg.connect(ADMIN, autocommit=True) as c:
+        for version, evento_id in enumerate(eventos, start=1):
+            c.execute(
+                "INSERT INTO outbox_evento (id, agregado_tipo, agregado_id, agregado_version, evento_tipo,"
+                " payload) VALUES (%s, 'ENVIO', %s, %s, 'PRUEBA', '{}')",
+                (evento_id, datos["envio"], version),
+            )
+            c.execute("INSERT INTO outbox_entrega (evento_id, destino) VALUES (%s, %s)", (evento_id, NEO4J))
+    conns = Connections(load_config())
+    repo = OutboxRepository()
+    try:
+        with Session(conns.engine) as t1, Session(conns.engine) as t2:
+            a = repo.reclamar(
+                t1, NEO4J, propietario_id=uuid.uuid4(), limite=5, reserva_s=60, agregado_id=datos["envio"]
+            )  # T1 todavía no confirmó: mantiene los locks
+            b = repo.reclamar(
+                t2, NEO4J, propietario_id=uuid.uuid4(), limite=10, reserva_s=60, agregado_id=datos["envio"]
+            )
+            assert len(a) == 5 and len(b) == 5  # el límite se respeta y T2 no espera: salta las bloqueadas
+            assert not {x.evento_id for x in a} & {x.evento_id for x in b}
+            t1.rollback()
+            t2.rollback()
+    finally:
+        conns.close()
+        with psycopg.connect(ADMIN, autocommit=True) as c:
+            c.execute("DELETE FROM outbox_entrega WHERE evento_id = ANY(%s)", (eventos,))
+            c.execute("DELETE FROM outbox_evento WHERE id = ANY(%s)", (eventos,))
+
+
+def test_la_lectura_para_el_grafo_espera_a_un_cambio_en_curso_del_envio(datos):
+    """Fase 3, D1: el subgrafo se arma desde UN estado consistente del envío.
+
+    Mientras una operación tiene el envío bloqueado (FOR UPDATE), la lectura para Neo4j (FOR SHARE) espera;
+    así nunca mezcla tramos de antes con contenedores de después.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    from logistica.core.config import load_config
+    from logistica.repositories.connections import Connections
+    from logistica.repositories.postgres.envios import EnvioRepository
+    from logistica.services.sincronizacion_service import SincronizacionService
+
+    conns = Connections(load_config())
+    try:
+        with Session(conns.engine) as operacion, Session(conns.engine) as lector:
+            EnvioRepository().obtener(operacion, datos["envio"], bloquear=True)  # cambio en curso
+            lector.execute(text("SET LOCAL lock_timeout = '300ms'"))
+            with pytest.raises(OperationalError, match="lock timeout|canceling statement"):
+                SincronizacionService(conns)._grafo_de(lector, datos["envio"])
+            lector.rollback()
+            operacion.rollback()  # el cambio termina
+            assert SincronizacionService(conns)._grafo_de(lector, datos["envio"]) is not None
+            lector.rollback()
+    finally:
+        conns.close()

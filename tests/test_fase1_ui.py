@@ -87,6 +87,17 @@ class FakeTerceros:
         ]
 
 
+class FakeSincronizacion:
+    def __init__(self):
+        self.vueltas = 0
+
+    def procesar_todo(self):
+        self.vueltas += 1
+
+    def resumen(self):
+        return {"NEO4J_LOGISTICA": {"PENDIENTE": 2, "FALLIDA": 1}, "MONGO_EVENTOS": {"PENDIENTE": 0}}
+
+
 class FakeEnvios:
     def listar(self, sesion_id, **filtros):
         return []
@@ -137,6 +148,7 @@ def servicios(acceso=None, terceros=None, auditoria=None) -> Servicios:
         auditoria=auditoria or FakeAuditoria(),
         catalogo=object(),
         envios=FakeEnvios(),
+        sincronizacion=FakeSincronizacion(),
     )
 
 
@@ -409,6 +421,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
     from logistica.services.auditoria_service import AuditoriaService
     from logistica.services.catalogo_service import CatalogoService
     from logistica.services.envio_service import EnvioService
+    from logistica.services.sincronizacion_service import SincronizacionService
     from logistica.services.autorizacion import Autorizador
     from logistica.services.health_service import HealthService
     from logistica.services.tercero_service import TerceroService
@@ -427,6 +440,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         AuditoriaService(tx_connections, aut),
         CatalogoService(tx_connections, aut),
         EnvioService(tx_connections, aut),
+        SincronizacionService(tx_connections),
     )
     sufijo = uuid.uuid4().hex[:8]
     with unit_of_work(tx_connections) as tx:
@@ -511,3 +525,17 @@ def test_sesion_vencida_cierra_el_formulario_modal_abierto(qapp):
     resultado = dialogo.exec()  # sin el arreglo, quedaría abierto bloqueando el login
     assert resultado == QDialog.DialogCode.Rejected
     assert ventana.isHidden()
+
+
+def test_la_sincronizacion_corre_solo_para_internos_y_muestra_el_estado(qapp):
+    from logistica.ui.main_window import MainWindow
+
+    interno = MainWindow(servicios(), principal({"OPERACIONES"}, {"envios.crear"}))
+    externo = MainWindow(servicios(), principal({"CLIENTE"}, {"envios.consultar"}, tercero_id=uuid.uuid4()))
+    assert interno.sincronizacion_activa() and not externo.sincronizacion_activa()
+    interno.sincronizar()
+    assert esperar(qapp, lambda: "pendientes" in interno.statusBar().currentMessage())
+    assert interno.statusBar().currentMessage() == "Sincronización: 2 pendientes, 1 fallidas (ver logs)"
+    interno.close()
+    assert not interno.sincronizacion_activa()  # al cerrar se detiene
+    externo.close()

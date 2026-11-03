@@ -15,6 +15,7 @@ from logistica.services.acceso_service import AccesoService
 from logistica.services.auditoria_service import AuditoriaService
 from logistica.services.catalogo_service import CatalogoService
 from logistica.services.envio_service import EnvioService
+from logistica.services.sincronizacion_service import SincronizacionService
 from logistica.services.autorizacion import Autorizador
 from logistica.services.health_service import HealthService
 from logistica.services.tercero_service import TerceroService
@@ -30,6 +31,7 @@ class Servicios:
     auditoria: AuditoriaService
     catalogo: CatalogoService
     envios: EnvioService
+    sincronizacion: SincronizacionService
 
 
 def crear_servicios(config: AppConfig, connections: Connections, instancia_id: uuid.UUID) -> Servicios:
@@ -43,5 +45,6 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
         terceros=TerceroService(connections, autorizador),
         auditoria=AuditoriaService(connections, autorizador),
         catalogo=CatalogoService(connections, autorizador),
+        sincronizacion=SincronizacionService(connections),
         envios=EnvioService(connections, autorizador),
     )

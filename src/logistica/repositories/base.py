@@ -70,7 +70,16 @@ def _translate(engine: str, exc: Exception) -> errors.LogisticaError | None:
     # --- Neo4j ---
     if isinstance(exc, neo4j_exc.ConstraintError):
         return errors.IntegrityError(str(exc))
-    if isinstance(exc, (neo4j_exc.ServiceUnavailable, neo4j_exc.SessionExpired, neo4j_exc.AuthError)):
+    # TransientError (deadlock, líder no disponible): se puede reintentar más tarde, como una caída.
+    if isinstance(
+        exc,
+        (
+            neo4j_exc.ServiceUnavailable,
+            neo4j_exc.SessionExpired,
+            neo4j_exc.AuthError,
+            neo4j_exc.TransientError,
+        ),
+    ):
         return errors.DatabaseUnavailableError(engine, str(exc))
     return None
 

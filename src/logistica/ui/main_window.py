@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Signal, Slot
+from PySide6.QtCore import QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -40,6 +40,7 @@ from logistica.ui.worker import WorkerPool
 
 log = logging.getLogger(__name__)
 SHUTDOWN_WAIT_MS = 10_000
+SYNC_MS = 10_000  # SUPUESTO (AGENTS.md §16.6): frecuencia de sincronización, a medir
 
 
 class MainWindow(QMainWindow):
@@ -54,6 +55,7 @@ class MainWindow(QMainWindow):
         self._servicios = servicios
         self.principal = principal
         self._pool = WorkerPool(self)
+        self._sincronizando = False
         self._terminada = False
 
         usuario = QLabel(f"{principal.nombre_completo} · {', '.join(sorted(principal.roles))}")
@@ -115,6 +117,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
         self.resize(900, 560)
+
+        # Fase 3: mientras un usuario INTERNO tiene la app abierta, esta instancia procesa la outbox
+        # (Mongo y Neo4j) cada SYNC_MS, fuera del hilo gráfico. Varias instancias a la vez no se pisan:
+        # el reclamo de entregas es atómico (FOR UPDATE SKIP LOCKED).
+        self._timer_sync = QTimer(self)
+        self._timer_sync.timeout.connect(self.sincronizar)
+        if principal.es_interno:
+            self._timer_sync.start(SYNC_MS)
 
     def titulos_pestanias(self) -> list[str]:
         return [self.tabs.tabText(i) for i in range(self.tabs.count())]
@@ -198,7 +208,38 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Contraseña", mensaje)
 
     # --- cierre ordenado ----------------------------------------------------
+    # --- sincronización (fase 3) --------------------------------------------
+    def sincronizacion_activa(self) -> bool:
+        return self._timer_sync.isActive()
+
+    @Slot()
+    def sincronizar(self) -> None:
+        if self._sincronizando or self._terminada:
+            return  # una vuelta por vez
+        self._sincronizando = True
+        servicio = self._servicios.sincronizacion
+
+        def vuelta():  # corre en el trabajador: solo llama al servicio
+            servicio.procesar_todo()
+            return servicio.resumen()
+
+        self._pool.submit(vuelta, self._sync_ok, self._sync_error)
+
+    @Slot(object)
+    def _sync_ok(self, resumen: dict) -> None:
+        self._sincronizando = False
+        pendientes = sum(r.get("PENDIENTE", 0) + r.get("EN_PROCESO", 0) for r in resumen.values())
+        fallidas = sum(r.get("FALLIDA", 0) for r in resumen.values())
+        texto = f"Sincronización: {pendientes} pendientes"
+        self.statusBar().showMessage(texto + (f", {fallidas} fallidas (ver logs)" if fallidas else ""))
+
+    @Slot(str)
+    def _sync_error(self, mensaje: str) -> None:
+        self._sincronizando = False
+        self.statusBar().showMessage(f"Sincronización detenida: {mensaje}")
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._timer_sync.stop()
         for vista in (self.estado, *self.vistas):
             vista.cerrar()  # no aceptan trabajo nuevo y esperan lo que está en curso
         cerrada_por_el_usuario = not self._terminada

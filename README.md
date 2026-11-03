@@ -12,6 +12,7 @@ python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\a
 pip install -r requirements-dev.txt
 python scripts/setup_databases.py                     # crea tablas, colecciones, constraints, roles
 PYTHONPATH=src python scripts/crear_admin.py --email admin@empresa.com --nombre Ana --apellido Paz   # primer administrador (pide la clave)
+PYTHONPATH=src python scripts/sincronizar.py --estado     # cola de la outbox (Mongo y Neo4j); ver --help
 PYTHONPATH=src python -m logistica.main               # Windows PowerShell: $env:PYTHONPATH="src"; python -m logistica.main
 ```
 
@@ -37,7 +38,8 @@ tests/         test_postgres_integrity.py (37) · test_particionamiento_postgres
                test_static_artifacts.py (6) · test_fase0_cimientos.py (43)
                test_fase1_dominio.py (28) · test_fase1_acceso.py (52) · test_fase1_ui.py (22)
                test_fase2_dominio.py (35) · test_fase2_logistica.py (34) · test_fase2_revision.py (16)
-               test_fase2_ui.py (9) · test_fase2_concurrencia.py (13)
+               test_fase2_ui.py (9) · test_fase2_concurrencia.py (15)
+               test_fase3_dominio.py (3) · test_fase3_sincronizacion.py (18)
 ```
 
 Capas: `ui → services → repositories → (PostgreSQL | MongoDB | Neo4j)`. La UI nunca ejecuta SQL ni
@@ -68,8 +70,9 @@ LOGISTICA_TEST_CONNECTIONS=1 LOGISTICA_TEST_PG="host=localhost port=5432 dbname=
 | Fase 0 (cimientos) | Ventana abierta en Windows 11; muestra el estado de los 3 motores sin congelarse (probado con un chequeo lento); un motor caído solo marca ese motor; logs sin contraseñas; un chequeo colgado se corta por timeout. 85 pruebas en verde con servidores |
 | Fase 1 (acceso) | Login argon2id, sesiones verificadas en PostgreSQL en cada operación, revocación, usuarios y roles, ABM de terceros y roles comerciales, pestañas por perfil. Probado contra PostgreSQL real con la identidad limitada: la matriz de los 5 perfiles, revocar sesión / desactivar usuario / quitar rol cortan la operación siguiente, alcance por empresa. **Falta** probarlo a mano en la ventana y los datos de demostración |
 | Fase 2 (logística) | Ubicaciones, vehículos, contenedores, sensores (instalación sin solapamiento), envíos con tramos continuos, asignación de contenedores con capacidad, planificación, inicio/fin de tramos, eventos, entrega y cancelación; outbox en la misma transacción. Probado contra PostgreSQL real (envío completo de punta a punta, reglas de §10.2, alcance por perfil) y el contrato de eventos contra el validador real de MongoDB. Supuestos S1–S10 en `AGENTS.md` §16. **Falta** probarlo a mano en la ventana |
+| Fase 3 (sincronización) | Outbox con reclamo atómico (dos trabajadores no procesan la misma entrega), histórico de eventos en MongoDB (idempotente por `_id`) y proyección de cada envío en Neo4j recalculada desde PostgreSQL con guarda de versión. Con Neo4j caído se sigue operando y al volver el grafo converge sin duplicados (probado; la caída se simula con un puerto sin servidor). `scripts/sincronizar.py` procesa, reencola fallidas o reconstruye el grafo |
 
-Pendiente de implementar: fases 3 a 9 de `AGENTS.md` (sincronización, monitoreo,
+Pendiente de implementar: fases 4 a 9 de `AGENTS.md` (monitoreo,
 trazabilidad, comercial, analítica, procesos periódicos, cierre).
 
 ## Decisiones tomadas al pasar el diseño a DDL (revisarlas con tu compañero)
