@@ -47,8 +47,9 @@ def test_no_se_planifica_con_entrega_estimada_anterior_a_la_creacion(g):
     e = g.nuevo_envio()
     pasado = datetime.now(timezone.utc) - timedelta(days=3)
     t1 = TramoPlan(g.A.id, g.B.id, "TERRESTRE", g.operador_sa.id, pasado, pasado + timedelta(hours=2))
-    t2 = TramoPlan(g.B.id, g.C.id, "MARITIMO", g.operador_sa.id, pasado + timedelta(hours=3),
-                   pasado + timedelta(hours=4))
+    t2 = TramoPlan(
+        g.B.id, g.C.id, "MARITIMO", g.operador_sa.id, pasado + timedelta(hours=3), pasado + timedelta(hours=4)
+    )
     g.env.definir_tramos(g.ops.sesion_id, e.id, [t1, t2])
     g.asignar(e.id, g.cont1)
     with pytest.raises(BusinessRuleError, match="anterior a la creación"):
@@ -110,7 +111,9 @@ def test_vehiculo_asignado_a_tramos_pendientes_no_se_da_de_baja(g):
 
 def test_sensor_instalado_no_se_da_de_baja(g):
     s = g.ops.sesion_id
-    sensor = g.cat.crear_sensor(s, SensorDatos(f"SEN-I{g.sufijo}", "GPS", "Acme", capacidades=frozenset({"GPS"})))
+    sensor = g.cat.crear_sensor(
+        s, SensorDatos(f"SEN-I{g.sufijo}", "GPS", "Acme", capacidades=frozenset({"GPS"}))
+    )
     g.cat.instalar_sensor(s, sensor.id, g.cont1.id, datetime.now(timezone.utc) - timedelta(hours=1))
     with pytest.raises(BusinessRuleError, match="instalado"):
         g.cat.set_estado_sensor(s, sensor.id, "BAJA")
@@ -118,7 +121,9 @@ def test_sensor_instalado_no_se_da_de_baja(g):
 
 def test_retirar_dos_veces_falla(g):
     s = g.ops.sesion_id
-    sensor = g.cat.crear_sensor(s, SensorDatos(f"SEN-R{g.sufijo}", "GPS", "Acme", capacidades=frozenset({"GPS"})))
+    sensor = g.cat.crear_sensor(
+        s, SensorDatos(f"SEN-R{g.sufijo}", "GPS", "Acme", capacidades=frozenset({"GPS"}))
+    )
     inst = g.cat.instalar_sensor(s, sensor.id, g.cont1.id, h(0))
     g.cat.retirar_sensor(s, inst.id, h(5))
     with pytest.raises(BusinessRuleError, match="ya retirado"):
@@ -173,8 +178,9 @@ def test_los_eventos_para_mongo_cumplen_el_validador_real(g):
     p = g.planificado()
     t1 = g.env.obtener(s, p.id).tramos[0]
     g.env.iniciar_tramo(s, t1.id, h(0.5))
-    g.env.registrar_evento(s, p.id, "RETRASO", h(1), {"motivo": "Lluvia", "demora_estimada_min": 30},
-                           tramo_id=t1.id)
+    g.env.registrar_evento(
+        s, p.id, "RETRASO", h(1), {"motivo": "Lluvia", "demora_estimada_min": 30}, tramo_id=t1.id
+    )
     g.env.registrar_evento(s, p.id, "ADUANA", h(2), {"etapa": "INGRESO", "referencia": 123})
     a_mongo = [ev for ev in g.outbox(p.id) if "tipo" in ev.payload]
     assert len(a_mongo) == 3
@@ -190,3 +196,40 @@ def test_los_eventos_para_mongo_cumplen_el_validador_real(g):
         assert guardado["fecha_ocurrencia"].replace(tzinfo=timezone.utc) == h(2)
     finally:
         coleccion.delete_many({"_id": {"$in": ids}})
+
+
+# --------------------------------------------------------------------------- decisiones del grupo (S2, S7)
+def test_planificar_exige_cobertura_total_de_la_carga(g):
+    """S7 (decidido por el grupo): en borrador se asigna parcial; planificar exige cubrir todo el envío."""
+    e = g.nuevo_envio(peso="8000", volumen="20")
+    g.ruta(e.id)
+    g.asignar(e.id, g.cont1, peso="6000", volumen="15")  # parcial: permitido en borrador
+    with pytest.raises(BusinessRuleError, match="cobertura parcial"):
+        g.env.planificar(g.ops.sesion_id, e.id)
+    g.asignar(e.id, g.cont2, peso="2000", volumen="5", desde=0, hasta=90)
+    assert g.env.planificar(g.ops.sesion_id, e.id).estado == "PLANIFICADO"
+
+
+def test_planificado_que_pierde_cobertura_vuelve_a_borrador(g):
+    e = g.nuevo_envio(peso="8000", volumen="20")
+    g.ruta(e.id)
+    g.asignar(e.id, g.cont1, peso="6000", volumen="15")
+    a2 = g.asignar(e.id, g.cont2, peso="2000", volumen="5", desde=0, hasta=90)
+    g.env.planificar(g.ops.sesion_id, e.id)
+    g.env.cancelar_asignacion(g.ops.sesion_id, a2.id)  # queda cubierto 6000 de 8000
+    assert g.env.obtener(g.ops.sesion_id, e.id).envio.estado == "BORRADOR"
+
+
+def test_asignar_vehiculo_genera_evento_y_version(g):
+    """S2 (decidido por el grupo): asignar un vehículo es un cambio del agregado y va a la outbox."""
+    e = g.nuevo_envio()
+    det = g.ruta(e.id, vehiculos=False)
+    antes = g.outbox(e.id)
+    g.env.asignar_vehiculo(g.ops.sesion_id, det.tramos[0].id, g.camion.id)
+    despues = g.outbox(e.id)
+    nuevo = despues[-1]
+    assert len(despues) == len(antes) + 1 and nuevo.evento_tipo == "VEHICULO_ASIGNADO"
+    assert list(nuevo.destinos) == ["NEO4J_LOGISTICA"]
+    assert nuevo.agregado_version == antes[-1].agregado_version + 1
+    assert nuevo.payload["tramo_id"] == str(det.tramos[0].id)
+    assert nuevo.payload["vehiculo_id"] == str(g.camion.id)

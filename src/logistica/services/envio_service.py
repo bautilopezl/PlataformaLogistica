@@ -32,6 +32,7 @@ from logistica.domain.logistica import (
     generar_codigo_envio,
     validar_capacidad,
     validar_confirmacion_entrega,
+    validar_cobertura_total,
     validar_continuidad,
     validar_detalles_evento,
     validar_fin_tramo,
@@ -141,12 +142,18 @@ class EnvioService:
             envio = self._bloquear(tx, envio_id)
             exigir_editable(envio.estado)
             planes = [t.normalizado() for t in tramos]
-            validar_continuidad(envio.origen_id, envio.destino_id, [
-                TramoRef(i, t.origen_id, t.destino_id, t.salida_estimada_en, t.llegada_estimada_en)
-                for i, t in enumerate(planes, start=1)
-            ])
+            validar_continuidad(
+                envio.origen_id,
+                envio.destino_id,
+                [
+                    TramoRef(i, t.origen_id, t.destino_id, t.salida_estimada_en, t.llegada_estimada_en)
+                    for i, t in enumerate(planes, start=1)
+                ],
+            )
             for t in planes:
-                self._exigir_tercero_con_rol(tx, t.operador_id, RolComercial.OPERADOR, "El operador del tramo")
+                self._exigir_tercero_con_rol(
+                    tx, t.operador_id, RolComercial.OPERADOR, "El operador del tramo"
+                )
                 for ubicacion_id in (t.origen_id, t.destino_id):
                     self._exigir_ubicacion_activa(tx, ubicacion_id)
                 if t.vehiculo_id is not None:
@@ -158,15 +165,30 @@ class EnvioService:
                 tx, envio_id, estado=EstadoEnvio.BORRADOR, entrega_estimada_en=None
             )
             # Con los ids, Neo4j puede reemplazar los nodos Tramo del envío por exactamente estos.
-            self._evento(tx, envio, version, "TRAMOS_DEFINIDOS", (NEO4J,), {
-                "envio_id": envio_id,
-                "tramos": [
-                    {"tramo_id": tid, "orden": i, "origen_id": t.origen_id, "destino_id": t.destino_id,
-                     "medio": t.medio, "operador_id": t.operador_id}
-                    for i, (tid, t) in enumerate(zip(ids, planes), start=1)
-                ],
-            })
-            auditoria.registrar(tx, "definir_tramos", p, entidad="envio", entidad_id=envio_id, tramos=len(planes))
+            self._evento(
+                tx,
+                envio,
+                version,
+                "TRAMOS_DEFINIDOS",
+                (NEO4J,),
+                {
+                    "envio_id": envio_id,
+                    "tramos": [
+                        {
+                            "tramo_id": tid,
+                            "orden": i,
+                            "origen_id": t.origen_id,
+                            "destino_id": t.destino_id,
+                            "medio": t.medio,
+                            "operador_id": t.operador_id,
+                        }
+                        for i, (tid, t) in enumerate(zip(ids, planes), start=1)
+                    ],
+                },
+            )
+            auditoria.registrar(
+                tx, "definir_tramos", p, entidad="envio", entidad_id=envio_id, tramos=len(planes)
+            )
             return self._detalle(tx, p, self._envios.obtener(tx, envio_id))
 
     def asignar_vehiculo(self, sesion_id: uuid.UUID, tramo_id: uuid.UUID, vehiculo_id: uuid.UUID) -> TramoDTO:
@@ -183,6 +205,24 @@ class EnvioService:
                 )
             self._validar_vehiculo(tx, vehiculo_id, tramo.medio, tramo.operador_id)
             self._tramos.asignar_vehiculo(tx, tramo_id, vehiculo_id)
+            # S2, DECIDIDO POR EL GRUPO: es un cambio del agregado; viaja a Neo4j por la outbox.
+            vehiculo = self._vehiculos.obtener(tx, vehiculo_id)
+            version = self._envios.nueva_version(tx, envio.id)
+            self._evento(
+                tx,
+                envio,
+                version,
+                "VEHICULO_ASIGNADO",
+                (NEO4J,),
+                {
+                    "envio_id": envio.id,
+                    "tramo_id": tramo_id,
+                    "vehiculo_id": vehiculo_id,
+                    "tipo": vehiculo.tipo,
+                    "identificacion": vehiculo.identificacion,
+                    "operador_id": vehiculo.operador_id,
+                },
+            )
             auditoria.registrar(
                 tx, "asignar_vehiculo", p, entidad="tramo", entidad_id=tramo_id, vehiculo_id=vehiculo_id
             )
@@ -246,7 +286,8 @@ class EnvioService:
             return self._asignaciones.obtener(tx, asignacion_id)
 
     def cancelar_asignacion(self, sesion_id: uuid.UUID, asignacion_id: uuid.UUID) -> AsignacionDTO:
-        """Cancela una reserva. Si un envío PLANIFICADO se queda sin contenedores vuelve a BORRADOR (S4)."""
+        """Cancela una reserva. Si un envío PLANIFICADO deja de tener toda la carga cubierta, vuelve a
+        BORRADOR (S7)."""
         with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR) as (tx, p):
             asignacion = self._asignaciones.obtener(tx, asignacion_id)
             if asignacion is None:
@@ -255,31 +296,51 @@ class EnvioService:
             exigir_editable(envio.estado)
             asignacion = self._asignaciones.obtener(tx, asignacion_id)  # releída con el envío bloqueado
             if asignacion.estado != "RESERVADA" or not self._asignaciones.cancelar(tx, asignacion_id):
-                raise BusinessRuleError("asignación no reservada", user_message="Solo se cancela una reserva.")
-            peso, _ = self._asignaciones.totales_vigentes(tx, envio.id)
-            if envio.estado == EstadoEnvio.PLANIFICADO and peso == 0:
+                raise BusinessRuleError(
+                    "asignación no reservada", user_message="Solo se cancela una reserva."
+                )
+            peso, volumen = self._asignaciones.totales_vigentes(tx, envio.id)
+            cubierto = peso == envio.peso_kg and volumen == envio.volumen_m3
+            if envio.estado == EstadoEnvio.PLANIFICADO and not cubierto:  # S7: hay que volver a planificar
                 version = self._envios.nueva_version(
                     tx, envio.id, estado=EstadoEnvio.BORRADOR, entrega_estimada_en=None
                 )
             else:
                 version = self._envios.nueva_version(tx, envio.id)
-            self._evento(tx, envio, version, "ASIGNACION_CANCELADA", (NEO4J,),
-                         {"envio_id": envio.id, "asignacion_id": asignacion_id})
-            auditoria.registrar(tx, "cancelar_asignacion", p, entidad="envio", entidad_id=envio.id,
-                                contenedor=asignacion.contenedor_codigo)
+            self._evento(
+                tx,
+                envio,
+                version,
+                "ASIGNACION_CANCELADA",
+                (NEO4J,),
+                {"envio_id": envio.id, "asignacion_id": asignacion_id},
+            )
+            auditoria.registrar(
+                tx,
+                "cancelar_asignacion",
+                p,
+                entidad="envio",
+                entidad_id=envio.id,
+                contenedor=asignacion.contenedor_codigo,
+            )
             return self._asignaciones.obtener(tx, asignacion_id)
 
     def planificar(self, sesion_id: uuid.UUID, envio_id: uuid.UUID) -> EnvioDTO:
-        """BORRADOR → PLANIFICADO. SUPUESTO S4: recorrido continuo y al menos un contenedor asignado."""
+        """BORRADOR → PLANIFICADO: recorrido continuo (S4) y contenedores que lleven toda la carga (S7)."""
         with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR) as (tx, p):
             envio = self._bloquear(tx, envio_id)
             exigir_transicion(envio.estado, EstadoEnvio.PLANIFICADO)
             tramos = self._tramos.de_envio(tx, envio_id)
             validar_continuidad(envio.origen_id, envio.destino_id, [_ref(t) for t in tramos])
-            peso, _ = self._asignaciones.totales_vigentes(tx, envio_id)
+            peso, volumen = self._asignaciones.totales_vigentes(tx, envio_id)
             if peso == 0:
-                raise BusinessRuleError("sin contenedor asignado",
-                                        user_message="Asigne al menos un contenedor antes de planificar.")
+                raise BusinessRuleError(
+                    "sin contenedor asignado",
+                    user_message="Asigne al menos un contenedor antes de planificar.",
+                )
+            validar_cobertura_total(
+                envio.peso_kg, envio.volumen_m3, peso, volumen
+            )  # S7 (decidido por el grupo)
             estimada = tramos[-1].llegada_estimada_en
             if estimada < envio.creado_en:  # mismo criterio que ck_envio_fechas_posteriores
                 raise BusinessRuleError(
@@ -290,8 +351,14 @@ class EnvioService:
             version = self._envios.nueva_version(
                 tx, envio_id, estado=EstadoEnvio.PLANIFICADO, entrega_estimada_en=estimada
             )
-            self._evento(tx, envio, version, "ENVIO_PLANIFICADO", (NEO4J,),
-                         {"envio_id": envio_id, "entrega_estimada_en": estimada})
+            self._evento(
+                tx,
+                envio,
+                version,
+                "ENVIO_PLANIFICADO",
+                (NEO4J,),
+                {"envio_id": envio_id, "entrega_estimada_en": estimada},
+            )
             auditoria.registrar(tx, "planificar_envio", p, entidad="envio", entidad_id=envio_id)
             return self._envios.obtener(tx, envio_id)
 
@@ -302,16 +369,22 @@ class EnvioService:
             tramo = self._tramo_en_alcance(tx, p, tramo_id)
             envio = self._bloquear(tx, tramo.envio_id)
             if envio.estado not in (EstadoEnvio.PLANIFICADO, EstadoEnvio.EN_TRANSITO):
-                raise BusinessRuleError("envío no planificado",
-                                        user_message="El envío debe estar planificado para iniciar un tramo.")
+                raise BusinessRuleError(
+                    "envío no planificado",
+                    user_message="El envío debe estar planificado para iniciar un tramo.",
+                )
             tramos = self._tramos.de_envio(tx, envio.id)
             tramo = next(t for t in tramos if t.id == tramo_id)  # releído con el envío bloqueado
             anterior = next((t for t in tramos if t.orden == tramo.orden - 1), None)
-            validar_inicio_tramo(tramo.orden, tramo.estado, tramo.vehiculo_id, anterior.estado if anterior else None)
+            validar_inicio_tramo(
+                tramo.orden, tramo.estado, tramo.vehiculo_id, anterior.estado if anterior else None
+            )
             if anterior is not None and salida_real < anterior.llegada_real_en:
-                raise BusinessRuleError("sale antes de la llegada del anterior",
-                                        user_message=f"El tramo {tramo.orden} no puede salir antes de la llegada "
-                                        f"real del tramo {anterior.orden}.")
+                raise BusinessRuleError(
+                    "sale antes de la llegada del anterior",
+                    user_message=f"El tramo {tramo.orden} no puede salir antes de la llegada "
+                    f"real del tramo {anterior.orden}.",
+                )
             self._validar_vehiculo(tx, tramo.vehiculo_id, tramo.medio, tramo.operador_id)
             if envio.estado == EstadoEnvio.PLANIFICADO:
                 self._validar_contenedores_para_salir(tx, envio.id, salida_real)
@@ -321,16 +394,33 @@ class EnvioService:
                 # El compromiso se fija una sola vez (el trigger trg_envio_compromiso_inmutable lo garantiza).
                 self._asignaciones.iniciar_uso(tx, envio.id, salida_real)
                 version = self._envios.nueva_version(
-                    tx, envio.id, estado=EstadoEnvio.EN_TRANSITO,
+                    tx,
+                    envio.id,
+                    estado=EstadoEnvio.EN_TRANSITO,
                     entrega_comprometida_en=envio.entrega_estimada_en,
                 )
             else:
                 version = self._envios.nueva_version(tx, envio.id)
-            self._evento(tx, envio, version, "TRAMO_INICIADO", (MONGO, NEO4J), self._doc_evento(
-                tx, envio, TipoEvento.TRAMO_INICIADO, salida_real, p, tramo_id=tramo_id,
-                ubicacion_id=tramo.origen_id, detalles={"orden": tramo.orden, "vehiculo_id": str(tramo.vehiculo_id)},
-            ))
-            auditoria.registrar(tx, "iniciar_tramo", p, entidad="tramo", entidad_id=tramo_id, envio=envio.codigo)
+            self._evento(
+                tx,
+                envio,
+                version,
+                "TRAMO_INICIADO",
+                (MONGO, NEO4J),
+                self._doc_evento(
+                    tx,
+                    envio,
+                    TipoEvento.TRAMO_INICIADO,
+                    salida_real,
+                    p,
+                    tramo_id=tramo_id,
+                    ubicacion_id=tramo.origen_id,
+                    detalles={"orden": tramo.orden, "vehiculo_id": str(tramo.vehiculo_id)},
+                ),
+            )
+            auditoria.registrar(
+                tx, "iniciar_tramo", p, entidad="tramo", entidad_id=tramo_id, envio=envio.codigo
+            )
             return self._tramo(tx, tramo_id)
 
     def _validar_contenedores_para_salir(self, tx: Any, envio_id: uuid.UUID, salida_real: datetime) -> None:
@@ -339,9 +429,13 @@ class EnvioService:
         Se bloquean y se verifica que ningún otro envío los esté usando en ese momento (por ejemplo, uno que
         se atrasó más allá de su reserva). Respaldo en la base: ex_envcont_uso.
         """
-        peso, _ = self._asignaciones.totales_vigentes(tx, envio_id)
+        peso, volumen = self._asignaciones.totales_vigentes(tx, envio_id)
         if peso == 0:
-            raise BusinessRuleError("sin contenedores", user_message="El envío no tiene contenedores asignados.")
+            raise BusinessRuleError(
+                "sin contenedores", user_message="El envío no tiene contenedores asignados."
+            )
+        envio = self._envios.obtener(tx, envio_id)
+        validar_cobertura_total(envio.peso_kg, envio.volumen_m3, peso, volumen)
         ocupados = self._asignaciones.contenedores_en_uso_por_otro(tx, envio_id, salida_real)
         if ocupados:
             raise BusinessRuleError(
@@ -358,14 +452,31 @@ class EnvioService:
             validar_fin_tramo(tramo.estado, tramo.salida_real_en, llegada_real)
             self._tramos.finalizar(tx, tramo_id, llegada_real)
             version = self._envios.nueva_version(tx, envio.id)
-            self._evento(tx, envio, version, "TRAMO_FINALIZADO", (MONGO, NEO4J), self._doc_evento(
-                tx, envio, TipoEvento.TRAMO_FINALIZADO, llegada_real, p, tramo_id=tramo_id,
-                ubicacion_id=tramo.destino_id, detalles={"orden": tramo.orden},
-            ))
-            auditoria.registrar(tx, "finalizar_tramo", p, entidad="tramo", entidad_id=tramo_id, envio=envio.codigo)
+            self._evento(
+                tx,
+                envio,
+                version,
+                "TRAMO_FINALIZADO",
+                (MONGO, NEO4J),
+                self._doc_evento(
+                    tx,
+                    envio,
+                    TipoEvento.TRAMO_FINALIZADO,
+                    llegada_real,
+                    p,
+                    tramo_id=tramo_id,
+                    ubicacion_id=tramo.destino_id,
+                    detalles={"orden": tramo.orden},
+                ),
+            )
+            auditoria.registrar(
+                tx, "finalizar_tramo", p, entidad="tramo", entidad_id=tramo_id, envio=envio.codigo
+            )
             return self._tramo(tx, tramo_id)
 
-    def confirmar_entrega(self, sesion_id: uuid.UUID, envio_id: uuid.UUID, entrega_real: datetime) -> EnvioDTO:
+    def confirmar_entrega(
+        self, sesion_id: uuid.UUID, envio_id: uuid.UUID, entrega_real: datetime
+    ) -> EnvioDTO:
         """La confirma Operaciones (envios.planificar); llegar al último destino no la sustituye."""
         with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR) as (tx, p):
             exigir_con_zona(entrega_real)
@@ -373,26 +484,43 @@ class EnvioService:
             exigir_transicion(envio.estado, EstadoEnvio.ENTREGADO)
             tramos = self._tramos.de_envio(tx, envio_id)
             llegadas = [t.llegada_real_en for t in tramos if t.llegada_real_en is not None]
-            validar_confirmacion_entrega([t.estado for t in tramos], max(llegadas, default=None), entrega_real)
+            validar_confirmacion_entrega(
+                [t.estado for t in tramos], max(llegadas, default=None), entrega_real
+            )
             # Mismos criterios que la base: ck_envio_fechas_posteriores y ck_envcont_uso_orden (uso > 0).
             usos = [a.uso_desde for a in self._asignaciones.de_envio(tx, envio_id) if a.estado == "EN_USO"]
             if entrega_real < envio.creado_en or any(entrega_real <= u for u in usos):
                 raise BusinessRuleError(
                     "entrega no posterior al inicio",
-                    user_message="La entrega debe ser posterior al inicio del viaje (uso de los contenedores).",
+                    user_message="La entrega debe ser posterior al inicio del viaje "
+                    "(uso de los contenedores).",
                 )
             self._asignaciones.finalizar_uso(tx, envio_id, entrega_real)
             version = self._envios.nueva_version(
                 tx, envio_id, estado=EstadoEnvio.ENTREGADO, entrega_real_en=entrega_real
             )
-            self._evento(tx, envio, version, "ENVIO_ENTREGADO", (MONGO, NEO4J), self._doc_evento(
-                tx, envio, TipoEvento.ENTREGADO, entrega_real, p, ubicacion_id=envio.destino_id,
-            ))
+            self._evento(
+                tx,
+                envio,
+                version,
+                "ENVIO_ENTREGADO",
+                (MONGO, NEO4J),
+                self._doc_evento(
+                    tx,
+                    envio,
+                    TipoEvento.ENTREGADO,
+                    entrega_real,
+                    p,
+                    ubicacion_id=envio.destino_id,
+                ),
+            )
             auditoria.registrar(tx, "confirmar_entrega", p, entidad="envio", entidad_id=envio_id)
             return self._envios.obtener(tx, envio_id)
 
     def cancelar(self, sesion_id: uuid.UUID, envio_id: uuid.UUID, motivo: str) -> EnvioDTO:
-        """Solo antes de salir (SUPUESTO S8). Cancela tramos pendientes y libera las reservas de contenedores."""
+        """Solo antes de salir (SUPUESTO S8). Cancela tramos pendientes y libera las reservas de
+        contenedores.
+        """
         with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR) as (tx, p):
             motivo = (motivo or "").strip()
             if not motivo:
@@ -400,8 +528,9 @@ class EnvioService:
             envio = self._bloquear(tx, envio_id)
             exigir_transicion(envio.estado, EstadoEnvio.CANCELADO)
             # El documento se arma ANTES de cancelar: así lleva los contenedores que tenía el envío.
-            doc = self._doc_evento(tx, envio, TipoEvento.CANCELADO, datetime.now().astimezone(), p,
-                                   detalles={"motivo": motivo})
+            doc = self._doc_evento(
+                tx, envio, TipoEvento.CANCELADO, datetime.now().astimezone(), p, detalles={"motivo": motivo}
+            )
             self._tramos.cancelar_pendientes(tx, envio_id)
             self._asignaciones.cancelar_reservadas(tx, envio_id)
             version = self._envios.nueva_version(tx, envio_id, estado=EstadoEnvio.CANCELADO)
@@ -421,7 +550,9 @@ class EnvioService:
         ubicacion_id: uuid.UUID | None = None,
         descripcion: str | None = None,
     ) -> None:
-        """Registra un evento manual (carga, descarga, retraso, aduana). Va a Mongo vía outbox (SUPUESTO S1)."""
+        """Registra un evento manual (carga, descarga, retraso, aduana). Va a Mongo vía outbox (SUPUESTO
+        S1).
+        """
         with self._aut.operacion(sesion_id, Permiso.TRAMOS_ACTUALIZAR) as (tx, p):
             # Alcance ANTES de bloquear o buscar: a un externo no se le revela si un envío ajeno existe.
             if not p.es_interno and not self._envios.en_alcance(
@@ -430,27 +561,47 @@ class EnvioService:
                 raise PermissionDeniedError(f"usuario {p.usuario_id} sin tramos en {envio_id}")
             tipo = (tipo or "").strip().upper()
             if tipo not in EVENTOS_MANUALES:
-                raise ValidationError(f"evento {tipo} no manual",
-                                      user_message="Ese tipo de evento lo registra el sistema, no se carga a mano.")
+                raise ValidationError(
+                    f"evento {tipo} no manual",
+                    user_message="Ese tipo de evento lo registra el sistema, no se carga a mano.",
+                )
             detalles = validar_detalles_evento(tipo, detalles)
             exigir_con_zona(fecha_ocurrencia)
             envio = self._bloquear(tx, envio_id)
             if envio.estado not in (EstadoEnvio.PLANIFICADO, EstadoEnvio.EN_TRANSITO):
-                raise BusinessRuleError("envío cerrado",
-                                        user_message="Solo se registran eventos de envíos planificados o en tránsito.")
+                raise BusinessRuleError(
+                    "envío cerrado",
+                    user_message="Solo se registran eventos de envíos planificados o en tránsito.",
+                )
             if tramo_id is not None:
                 tramo = self._tramo(tx, tramo_id)
                 if tramo.envio_id != envio_id:
-                    raise ValidationError("tramo de otro envío", user_message="El tramo no pertenece al envío.")
+                    raise ValidationError(
+                        "tramo de otro envío", user_message="El tramo no pertenece al envío."
+                    )
                 if not p.es_interno and tramo.operador_id != p.tercero_id:
                     raise PermissionDeniedError(f"tramo {tramo_id} de otro operador")
             if ubicacion_id is not None and self._ubicaciones.obtener(tx, ubicacion_id) is None:
                 raise NotFoundError(f"ubicación {ubicacion_id}", user_message="La ubicación no existe.")
             version = self._envios.nueva_version(tx, envio_id)
-            self._evento(tx, envio, version, "EVENTO_REGISTRADO", (MONGO,), self._doc_evento(
-                tx, envio, TipoEvento(tipo), fecha_ocurrencia, p, tramo_id=tramo_id, ubicacion_id=ubicacion_id,
-                descripcion=(descripcion or "").strip() or None, detalles=detalles,
-            ))
+            self._evento(
+                tx,
+                envio,
+                version,
+                "EVENTO_REGISTRADO",
+                (MONGO,),
+                self._doc_evento(
+                    tx,
+                    envio,
+                    TipoEvento(tipo),
+                    fecha_ocurrencia,
+                    p,
+                    tramo_id=tramo_id,
+                    ubicacion_id=ubicacion_id,
+                    descripcion=(descripcion or "").strip() or None,
+                    detalles=detalles,
+                ),
+            )
             auditoria.registrar(tx, "registrar_evento", p, entidad="envio", entidad_id=envio_id, tipo=tipo)
 
     def _visible(self, tx: Any, p: Principal, envio_id: uuid.UUID) -> EnvioDTO:

@@ -549,6 +549,24 @@ def validar_confirmacion_entrega(
         )
 
 
+def validar_cobertura_total(
+    peso_envio: Decimal, volumen_envio: Decimal, peso_total: Decimal, volumen_total: Decimal
+) -> None:
+    """Para planificar (y salir), los contenedores deben llevar TODO el envío.
+
+    S7, DECIDIDO POR EL GRUPO: en borrador se puede asignar carga parcial; planificar exige cobertura total.
+    Junto con `validar_total_asignado` (nunca más que el envío), esto significa: asignado == envío.
+    """
+    if peso_total != peso_envio or volumen_total != volumen_envio:
+        raise BusinessRuleError(
+            f"cobertura parcial: {peso_total}/{peso_envio} kg, {volumen_total}/{volumen_envio} m3",
+            user_message=(
+                f"Los contenedores deben llevar toda la carga para planificar: asignados {peso_total} de "
+                f"{peso_envio} kg y {volumen_total} de {volumen_envio} m³."
+            ),
+        )
+
+
 # --------------------------------------------------------------------------- eventos logísticos
 class TipoEvento(StrEnum):
     """Tipos de `eventos_logisticos` (deben coincidir con db/mongo/setup_mongo.py)."""
@@ -603,11 +621,14 @@ def validar_detalles_evento(tipo: str, detalles: dict[str, Any]) -> dict[str, An
 def _minutos(valor: Any) -> int:
     """Entero de minutos >= 0. No se trunca: 2.7 es un error, no 2."""
     if isinstance(valor, bool) or isinstance(valor, float):
-        raise ValidationError("demora no entera", user_message="La demora estimada es un número entero de minutos.")
+        raise ValidationError(
+            "demora no entera", user_message="La demora estimada es un número entero de minutos."
+        )
     texto = str(valor).strip()
     if not re.fullmatch(r"\d+", texto):
-        raise ValidationError("demora inválida",
-                              user_message="La demora estimada es un número entero de minutos, sin signo.")
+        raise ValidationError(
+            "demora inválida", user_message="La demora estimada es un número entero de minutos, sin signo."
+        )
     return int(texto)
 
 

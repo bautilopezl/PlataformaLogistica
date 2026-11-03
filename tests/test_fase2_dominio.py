@@ -78,6 +78,13 @@ def test_capacidad_del_contenedor():
         d.validar_capacidad(Decimal("1"), Decimal("10.5"), Decimal("1000"), Decimal("10"))
 
 
+def test_cobertura_total_para_planificar():
+    d.validar_cobertura_total(Decimal("500"), Decimal("5"), Decimal("500.000"), Decimal("5"))
+    for peso, vol in (("499.999", "5"), ("500", "4.9"), ("0", "0")):
+        with pytest.raises(BusinessRuleError, match="cobertura parcial"):
+            d.validar_cobertura_total(Decimal("500"), Decimal("5"), Decimal(peso), Decimal(vol))
+
+
 def test_no_se_asigna_mas_carga_que_la_del_envio():
     d.validar_total_asignado(Decimal("500"), Decimal("5"), Decimal("500"), Decimal("5"))
     with pytest.raises(BusinessRuleError):
