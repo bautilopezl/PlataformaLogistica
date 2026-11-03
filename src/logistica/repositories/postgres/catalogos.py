@@ -98,7 +98,10 @@ class UbicacionRepository:
 class VehiculoRepository:
     def tiene_tramos_abiertos(self, tx: Session, vehiculo_id: uuid.UUID) -> bool:
         return tx.execute(
-            text("SELECT EXISTS (SELECT 1 FROM tramo WHERE vehiculo_id = :id AND estado IN ('PENDIENTE', 'EN_CURSO'))"),
+            text(
+                "SELECT EXISTS (SELECT 1 FROM tramo WHERE vehiculo_id = :id AND estado IN ('PENDIENTE', "
+                "'EN_CURSO'))"
+            ),
             {"id": vehiculo_id},
         ).scalar_one()
 
@@ -152,8 +155,10 @@ class VehiculoRepository:
 class ContenedorRepository:
     def tiene_asignaciones_activas(self, tx: Session, contenedor_id: uuid.UUID) -> bool:
         return tx.execute(
-            text("SELECT EXISTS (SELECT 1 FROM envio_contenedor WHERE contenedor_id = :id"
-                 " AND estado IN ('RESERVADA', 'EN_USO'))"),
+            text(
+                "SELECT EXISTS (SELECT 1 FROM envio_contenedor WHERE contenedor_id = :id"
+                " AND estado IN ('RESERVADA', 'EN_USO'))"
+            ),
             {"id": contenedor_id},
         ).scalar_one()
 
@@ -319,10 +324,13 @@ class SensorRepository:
 
     def retirar(self, tx: Session, instalacion_id: uuid.UUID, retirado_en: datetime) -> bool:
         """Devuelve False si ya estaba retirada (otra operación se adelantó)."""
-        return tx.execute(
-            text("UPDATE sensor_contenedor SET retirado_en = :r WHERE id = :id AND retirado_en IS NULL"),
-            {"id": instalacion_id, "r": retirado_en},
-        ).rowcount == 1
+        return (
+            tx.execute(
+                text("UPDATE sensor_contenedor SET retirado_en = :r WHERE id = :id AND retirado_en IS NULL"),
+                {"id": instalacion_id, "r": retirado_en},
+            ).rowcount
+            == 1
+        )
 
     def historial(self, tx: Session, sensor_id: uuid.UUID) -> list[InstalacionDTO]:
         rows = tx.execute(

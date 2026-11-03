@@ -159,14 +159,26 @@ class TramoRepository:
             ids.append(tramo_id)
             tx.execute(
                 text(
-                    "INSERT INTO tramo (id, envio_id, orden, origen_id, destino_id, medio, operador_id, vehiculo_id,"
-                    " salida_estimada_en, llegada_estimada_en, costo, moneda_codigo) VALUES (:id, :envio, :orden,"
+                    "INSERT INTO tramo (id, envio_id, orden, origen_id, destino_id, medio, operador_id, "
+                    "vehiculo_id,"
+                    " salida_estimada_en, llegada_estimada_en, costo, moneda_codigo) VALUES (:id, :envio, "
+                    ":orden,"
                     " :origen, :destino, :medio, :operador, :vehiculo, :salida, :llegada, :costo, :moneda)"
                 ),
-                {"id": tramo_id, "envio": envio_id, "orden": orden, "origen": t.origen_id,
-                 "destino": t.destino_id, "medio": t.medio, "operador": t.operador_id, "vehiculo": t.vehiculo_id,
-                 "salida": t.salida_estimada_en, "llegada": t.llegada_estimada_en, "costo": t.costo,
-                 "moneda": t.moneda_codigo},
+                {
+                    "id": tramo_id,
+                    "envio": envio_id,
+                    "orden": orden,
+                    "origen": t.origen_id,
+                    "destino": t.destino_id,
+                    "medio": t.medio,
+                    "operador": t.operador_id,
+                    "vehiculo": t.vehiculo_id,
+                    "salida": t.salida_estimada_en,
+                    "llegada": t.llegada_estimada_en,
+                    "costo": t.costo,
+                    "moneda": t.moneda_codigo,
+                },
             )
         return ids
 
@@ -265,10 +277,15 @@ class AsignacionRepository:
 
     def cancelar(self, tx: Session, asignacion_id: uuid.UUID) -> bool:
         """Devuelve False si ya no estaba RESERVADA (por ejemplo, otra operación la canceló antes)."""
-        return tx.execute(
-            text("UPDATE envio_contenedor SET estado = 'CANCELADA' WHERE id = :id AND estado = 'RESERVADA'"),
-            {"id": asignacion_id},
-        ).rowcount == 1
+        return (
+            tx.execute(
+                text(
+                    "UPDATE envio_contenedor SET estado = 'CANCELADA' WHERE id = :id AND estado = 'RESERVADA'"
+                ),
+                {"id": asignacion_id},
+            ).rowcount
+            == 1
+        )
 
     def contenedores_en_uso_por_otro(self, tx: Session, envio_id: uuid.UUID, desde: datetime) -> list[str]:
         """Contenedores reservados por este envío que otro envío está usando en [desde, ∞).
@@ -277,23 +294,29 @@ class AsignacionRepository:
         criterio que la restricción ex_envcont_uso.
         """
         tx.execute(
-            text("SELECT 1 FROM contenedor WHERE id IN (SELECT contenedor_id FROM envio_contenedor"
-                 " WHERE envio_id = :e AND estado = 'RESERVADA') ORDER BY id FOR UPDATE"),
+            text(
+                "SELECT 1 FROM contenedor WHERE id IN (SELECT contenedor_id FROM envio_contenedor"
+                " WHERE envio_id = :e AND estado = 'RESERVADA') ORDER BY id FOR UPDATE"
+            ),
             {"e": envio_id},
         )
-        return list(tx.execute(
-            text(
-                "SELECT DISTINCT k.codigo_internacional FROM envio_contenedor mia"
-                " JOIN envio_contenedor otra ON otra.contenedor_id = mia.contenedor_id AND otra.envio_id <> mia.envio_id"
-                " JOIN contenedor k ON k.id = mia.contenedor_id"
-                " WHERE mia.envio_id = :e AND mia.estado = 'RESERVADA'"
-                "   AND otra.uso_desde IS NOT NULL AND otra.estado IN ('EN_USO', 'FINALIZADA')"
-                "   AND tstzrange(otra.uso_desde, COALESCE(otra.uso_hasta, 'infinity'::timestamptz), '[)')"
-                "       && tstzrange(:d, 'infinity'::timestamptz, '[)')"
-                " ORDER BY 1"
-            ),
-            {"e": envio_id, "d": desde},
-        ).scalars())
+        return list(
+            tx.execute(
+                text(
+                    "SELECT DISTINCT k.codigo_internacional FROM envio_contenedor mia"
+                    " JOIN envio_contenedor otra ON otra.contenedor_id = mia.contenedor_id AND "
+                    "otra.envio_id <> mia.envio_id"
+                    " JOIN contenedor k ON k.id = mia.contenedor_id"
+                    " WHERE mia.envio_id = :e AND mia.estado = 'RESERVADA'"
+                    "   AND otra.uso_desde IS NOT NULL AND otra.estado IN ('EN_USO', 'FINALIZADA')"
+                    "   AND tstzrange(otra.uso_desde, COALESCE(otra.uso_hasta, 'infinity'::timestamptz), "
+                    "'[)')"
+                    "       && tstzrange(:d, 'infinity'::timestamptz, '[)')"
+                    " ORDER BY 1"
+                ),
+                {"e": envio_id, "d": desde},
+            ).scalars()
+        )
 
     def cancelar_reservadas(self, tx: Session, envio_id: uuid.UUID) -> None:
         tx.execute(

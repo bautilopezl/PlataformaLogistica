@@ -130,8 +130,10 @@ class CatalogoService:
     def set_estado_vehiculo(self, sesion_id: uuid.UUID, vehiculo_id: uuid.UUID, estado: str) -> VehiculoDTO:
         def guarda(tx: Any) -> None:
             if self._vehiculos.tiene_tramos_abiertos(tx, vehiculo_id):
-                raise BusinessRuleError("vehículo con tramos sin terminar",
-                                        user_message="El vehículo está asignado a tramos sin terminar.")
+                raise BusinessRuleError(
+                    "vehículo con tramos sin terminar",
+                    user_message="El vehículo está asignado a tramos sin terminar.",
+                )
 
         return self._set_estado(sesion_id, "vehiculo", vehiculo_id, estado, self._vehiculos, guarda)
 
@@ -151,12 +153,16 @@ class CatalogoService:
             auditoria.registrar(tx, "crear_contenedor", p, entidad="contenedor", entidad_id=cid)
             return self._contenedores.obtener(tx, cid)
 
-    def set_estado_contenedor(self, sesion_id: uuid.UUID, contenedor_id: uuid.UUID, estado: str) -> ContenedorDTO:
+    def set_estado_contenedor(
+        self, sesion_id: uuid.UUID, contenedor_id: uuid.UUID, estado: str
+    ) -> ContenedorDTO:
         def guarda(tx: Any) -> None:
             self._contenedores.obtener(tx, contenedor_id, bloquear=True)  # serializa con asignar_contenedor
             if self._contenedores.tiene_asignaciones_activas(tx, contenedor_id):
-                raise BusinessRuleError("contenedor con asignaciones activas",
-                                        user_message="El contenedor tiene asignaciones activas (reservado o en uso).")
+                raise BusinessRuleError(
+                    "contenedor con asignaciones activas",
+                    user_message="El contenedor tiene asignaciones activas (reservado o en uso).",
+                )
 
         return self._set_estado(sesion_id, "contenedor", contenedor_id, estado, self._contenedores, guarda)
 
@@ -180,8 +186,10 @@ class CatalogoService:
         def guarda(tx: Any) -> None:
             sensor = self._sensores.obtener(tx, sensor_id, bloquear=True)
             if sensor is not None and sensor.contenedor_actual is not None:
-                raise BusinessRuleError("sensor instalado",
-                                        user_message="El sensor está instalado en un contenedor. Retírelo primero.")
+                raise BusinessRuleError(
+                    "sensor instalado",
+                    user_message="El sensor está instalado en un contenedor. Retírelo primero.",
+                )
 
         return self._set_estado(sesion_id, "sensor", sensor_id, estado, self._sensores, guarda)
 
@@ -244,14 +252,25 @@ class CatalogoService:
             self._sensores.obtener(tx, inst.sensor_id, bloquear=True)  # serializa con instalar_sensor
             inst = self._sensores.instalacion(tx, instalacion_id)  # releída con el sensor bloqueado
             if inst.retirado_en is not None:
-                raise BusinessRuleError("ya retirado", user_message="El sensor ya fue retirado de ese contenedor.")
+                raise BusinessRuleError(
+                    "ya retirado", user_message="El sensor ya fue retirado de ese contenedor."
+                )
             if retirado_en <= inst.instalado_en:
-                raise BusinessRuleError("retiro antes de instalar",
-                                        user_message="El retiro debe ser posterior a la instalación.")
+                raise BusinessRuleError(
+                    "retiro antes de instalar", user_message="El retiro debe ser posterior a la instalación."
+                )
             if not self._sensores.retirar(tx, instalacion_id, retirado_en):
-                raise BusinessRuleError("ya retirado", user_message="El sensor ya fue retirado de ese contenedor.")
-            auditoria.registrar(tx, "retirar_sensor", p, entidad="sensor", entidad_id=inst.sensor_id,
-                                contenedor=inst.contenedor_codigo)
+                raise BusinessRuleError(
+                    "ya retirado", user_message="El sensor ya fue retirado de ese contenedor."
+                )
+            auditoria.registrar(
+                tx,
+                "retirar_sensor",
+                p,
+                entidad="sensor",
+                entidad_id=inst.sensor_id,
+                contenedor=inst.contenedor_codigo,
+            )
             return self._sensores.instalacion(tx, instalacion_id)
 
     def historial_sensor(self, sesion_id: uuid.UUID, sensor_id: uuid.UUID) -> list[InstalacionDTO]:
@@ -268,9 +287,18 @@ class CatalogoService:
                 raise PermissionDeniedError(f"usuario externo {p.usuario_id} consultando catálogos")
             yield tx
 
-    def _set_estado(self, sesion_id: uuid.UUID, entidad: str, recurso_id: uuid.UUID, estado: str, repo: Any,
-                    guarda: Any = None):
-        """Cambia el estado de un recurso. `guarda(tx)` se ejecuta antes si el recurso deja de estar habilitado."""
+    def _set_estado(
+        self,
+        sesion_id: uuid.UUID,
+        entidad: str,
+        recurso_id: uuid.UUID,
+        estado: str,
+        repo: Any,
+        guarda: Any = None,
+    ):
+        """Cambia el estado de un recurso. `guarda(tx)` se ejecuta antes si el recurso deja de estar
+        habilitado.
+        """
         with self._aut.operacion(sesion_id, GESTIONAR) as (tx, p):
             estado = (estado or "").strip().upper()
             if estado not in {e.value for e in EstadoRecurso}:
@@ -279,6 +307,7 @@ class CatalogoService:
                 guarda(tx)
             if not repo.set_estado(tx, recurso_id, estado):
                 raise NotFoundError(f"{entidad} {recurso_id}", user_message="El registro no existe.")
-            auditoria.registrar(tx, f"estado_{entidad}", p, entidad=entidad, entidad_id=recurso_id, estado=estado)
+            auditoria.registrar(
+                tx, f"estado_{entidad}", p, entidad=entidad, entidad_id=recurso_id, estado=estado
+            )
             return repo.obtener(tx, recurso_id)
-

@@ -1,13 +1,14 @@
 """Fase 2 — serialización de operaciones concurrentes (locks de PostgreSQL).
 
 Qué se prueba y qué no:
-- Con DOS conexiones reales (identidad PG_APP_USER): mientras una transacción tiene el lock de un envío o de un
-  contenedor, otra no puede tomarlo. Es el mecanismo que serializa las operaciones del servicio.
+- Con DOS conexiones reales (identidad PG_APP_USER): mientras una transacción tiene el lock de un envío
+  o de un contenedor, otra no puede tomarlo. Es el mecanismo que serializa las operaciones del servicio.
 - En el código: cada operación de EnvioService que modifica un envío toma ese lock (`_bloquear`), y la
   asignación de contenedores bloquea además el contenedor.
-- NO se prueba una carrera completa entre dos llamadas al servicio: los servicios escriben en `auditoria`, que es
-  inmutable, y la prueba dejaría datos permanentes en la base de desarrollo. Los datos mínimos de esta prueba se
-  crean y se borran con la identidad de administración (LOGISTICA_TEST_PG).
+- NO se prueba una carrera completa entre dos llamadas al servicio: los servicios escriben en
+  `auditoria`, que es inmutable, y la prueba dejaría datos permanentes en la base de desarrollo. Los
+  datos mínimos de esta prueba se crean y se borran con la identidad de administración
+  (LOGISTICA_TEST_PG).
 
 Requiere LOGISTICA_TEST_CONNECTIONS=1 y LOGISTICA_TEST_PG.
 """
@@ -24,11 +25,22 @@ import pytest
 ADMIN = os.environ.get("LOGISTICA_TEST_PG")
 pytestmark = pytest.mark.skipif(
     os.environ.get("LOGISTICA_TEST_CONNECTIONS") != "1" or not ADMIN,
-    reason="definir LOGISTICA_TEST_CONNECTIONS=1 y LOGISTICA_TEST_PG (datos confirmados, se borran al terminar)",
+    reason="definir LOGISTICA_TEST_CONNECTIONS=1 y LOGISTICA_TEST_PG "
+    "(datos confirmados, se borran al terminar)",
 )
 
-MUTANTES = ("definir_tramos", "asignar_vehiculo", "asignar_contenedor", "cancelar_asignacion", "planificar",
-            "iniciar_tramo", "finalizar_tramo", "confirmar_entrega", "cancelar", "registrar_evento")
+MUTANTES = (
+    "definir_tramos",
+    "asignar_vehiculo",
+    "asignar_contenedor",
+    "cancelar_asignacion",
+    "planificar",
+    "iniciar_tramo",
+    "finalizar_tramo",
+    "confirmar_entrega",
+    "cancelar",
+    "registrar_evento",
+)
 
 
 @pytest.fixture()
@@ -37,18 +49,31 @@ def datos():
     ids = {k: uuid.uuid4() for k in ("tercero", "usuario", "origen", "destino", "envio", "contenedor")}
     sufijo = ids["envio"].hex[:8]
     with psycopg.connect(ADMIN, autocommit=True) as c:
-        c.execute("INSERT INTO tercero (id, razon_social, pais_codigo, tipo_identificacion, numero_identificacion)"
-                  " VALUES (%s, %s, 'AR', 'CUIT', %s)", (ids["tercero"], f"Conc {sufijo}", f"99-{sufijo}"))
-        c.execute("INSERT INTO usuario (id, nombre, apellido, email, password_hash) VALUES (%s, 'C', 'C', %s, 'x')",
-                  (ids["usuario"], f"conc-{sufijo}@test.local"))
+        c.execute(
+            "INSERT INTO tercero (id, razon_social, pais_codigo, tipo_identificacion, numero_identificacion)"
+            " VALUES (%s, %s, 'AR', 'CUIT', %s)",
+            (ids["tercero"], f"Conc {sufijo}", f"99-{sufijo}"),
+        )
+        c.execute(
+            "INSERT INTO usuario (id, nombre, apellido, email, password_hash) VALUES (%s, 'C', 'C', %s, 'x')",
+            (ids["usuario"], f"conc-{sufijo}@test.local"),
+        )
         for clave in ("origen", "destino"):
-            c.execute("INSERT INTO ubicacion (id, nombre, tipo, pais_codigo, ciudad) VALUES (%s, %s, 'OTRO', 'AR', 'X')",
-                      (ids[clave], f"{clave} {sufijo}"))
-        c.execute("INSERT INTO envio (id, codigo, cliente_id, origen_id, destino_id, descripcion_carga, peso_kg,"
-                  " volumen_m3, creado_por_id) VALUES (%s, %s, %s, %s, %s, 'x', 1, 1, %s)",
-                  (ids["envio"], f"CONC-{sufijo}", ids["tercero"], ids["origen"], ids["destino"], ids["usuario"]))
-        c.execute("INSERT INTO contenedor (id, codigo_internacional, tipo, capacidad_kg, capacidad_m3)"
-                  " VALUES (%s, %s, 'SECO', 1, 1)", (ids["contenedor"], f"CONC{sufijo}"))
+            c.execute(
+                "INSERT INTO ubicacion (id, nombre, tipo, pais_codigo, ciudad) VALUES (%s, %s, 'OTRO', "
+                "'AR', 'X')",
+                (ids[clave], f"{clave} {sufijo}"),
+            )
+        c.execute(
+            "INSERT INTO envio (id, codigo, cliente_id, origen_id, destino_id, descripcion_carga, peso_kg,"
+            " volumen_m3, creado_por_id) VALUES (%s, %s, %s, %s, %s, 'x', 1, 1, %s)",
+            (ids["envio"], f"CONC-{sufijo}", ids["tercero"], ids["origen"], ids["destino"], ids["usuario"]),
+        )
+        c.execute(
+            "INSERT INTO contenedor (id, codigo_internacional, tipo, capacidad_kg, capacidad_m3)"
+            " VALUES (%s, %s, 'SECO', 1, 1)",
+            (ids["contenedor"], f"CONC{sufijo}"),
+        )
     try:
         yield ids
     finally:
@@ -92,16 +117,20 @@ def test_dos_operaciones_sobre_el_mismo_envio_se_serializan(datos):
     from logistica.repositories.postgres.envios import EnvioRepository
 
     repo = EnvioRepository()
-    assert _segunda_espera(lambda tx: repo.obtener(tx, datos["envio"], bloquear=True),
-                           lambda tx: repo.obtener(tx, datos["envio"], bloquear=True))
+    assert _segunda_espera(
+        lambda tx: repo.obtener(tx, datos["envio"], bloquear=True),
+        lambda tx: repo.obtener(tx, datos["envio"], bloquear=True),
+    )
 
 
 def test_dos_asignaciones_del_mismo_contenedor_se_serializan(datos):
     from logistica.repositories.postgres.catalogos import ContenedorRepository
 
     repo = ContenedorRepository()
-    assert _segunda_espera(lambda tx: repo.obtener(tx, datos["contenedor"], bloquear=True),
-                           lambda tx: repo.obtener(tx, datos["contenedor"], bloquear=True))
+    assert _segunda_espera(
+        lambda tx: repo.obtener(tx, datos["contenedor"], bloquear=True),
+        lambda tx: repo.obtener(tx, datos["contenedor"], bloquear=True),
+    )
 
 
 @pytest.mark.parametrize("metodo", MUTANTES)

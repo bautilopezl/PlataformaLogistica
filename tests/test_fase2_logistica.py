@@ -177,7 +177,9 @@ def test_sensor_no_se_instala_en_dos_contenedores_a_la_vez(g):
     )
     assert sensor.capacidades == frozenset({"TEMPERATURA", "GPS"})
     inst = g.cat.instalar_sensor(s, sensor.id, g.cont1.id, h(0))
-    with pytest.raises(BusinessRuleError, match="instalación superpuesta"):  # superpuesto: sigue instalado en cont1
+    with pytest.raises(
+        BusinessRuleError, match="instalación superpuesta"
+    ):  # superpuesto: sigue instalado en cont1
         g.cat.instalar_sensor(s, sensor.id, g.cont2.id, h(10))
     g.cat.retirar_sensor(s, inst.id, h(5))
     with pytest.raises(BusinessRuleError, match="instalación superpuesta"):  # se superpone con [h0, h5)
