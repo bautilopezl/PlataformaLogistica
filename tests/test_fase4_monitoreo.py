@@ -2,7 +2,8 @@
 
 Cubre el flujo "Lectura IoT" de AGENTS.md §9: ingesta idempotente en Mongo → evaluación en UNA transacción de
 PostgreSQL → marca en Mongo, incluida la caída entre el commit y la marca. PostgreSQL se revierte solo
-(`tx_connections`); las lecturas y eventos de Mongo se borran al terminar. Requiere LOGISTICA_TEST_CONNECTIONS=1.
+(`tx_connections`); las lecturas y eventos de Mongo se borran al terminar. Requiere
+LOGISTICA_TEST_CONNECTIONS=1.
 """
 
 from __future__ import annotations
@@ -47,14 +48,25 @@ class Monitoreo(Logistica):
         s = self.ops.sesion_id
         self.reloj = Reloj(SALIDA)
         self.mon = MonitoreoService(conns, self.aut, reloj=self.reloj)
-        self.sensor = self.cat.crear_sensor(s, SensorDatos(
-            f"SEN-{self.sufijo}", "MULTISENSOR", "Acme",
-            capacidades=frozenset({"TEMPERATURA", "HUMEDAD", "VIBRACION", "BATERIA", "GPS"})))
+        self.sensor = self.cat.crear_sensor(
+            s,
+            SensorDatos(
+                f"SEN-{self.sufijo}",
+                "MULTISENSOR",
+                "Acme",
+                capacidades=frozenset({"TEMPERATURA", "HUMEDAD", "VIBRACION", "BATERIA", "GPS"}),
+            ),
+        )
         self.sensores = [self.sensor.id]
         self.cat.instalar_sensor(s, self.sensor.id, self.cont1.id, h(0))
         self.envio = self.planificado()
-        self.mon.definir_condiciones(s, self.envio.id, CondicionDatos(
-            temperatura_min_c="2", temperatura_max_c="8", vibracion_max_g="3", bateria_min_pct="20"))
+        self.mon.definir_condiciones(
+            s,
+            self.envio.id,
+            CondicionDatos(
+                temperatura_min_c="2", temperatura_max_c="8", vibracion_max_g="3", bateria_min_pct="20"
+            ),
+        )
         self.t1, self.t2 = self.env.obtener(s, self.envio.id).tramos
         self.env.iniciar_tramo(s, self.t1.id, SALIDA)
 
@@ -62,16 +74,25 @@ class Monitoreo(Logistica):
         """Lectura medida `seg` segundos después de la salida y recibida `demora` segundos más tarde."""
         medida = SALIDA + timedelta(seconds=seg)
         self.reloj.t = medida + timedelta(seconds=demora)
-        entrada = LecturaEntrada(lectura_id or uuid.uuid4(), sensor_id or self.sensor.id, medida,
-                                 mediciones or {"temperatura_c": 5}, latitud=-34.6, longitud=-58.4,
-                                 origen="SIMULADOR")
+        entrada = LecturaEntrada(
+            lectura_id or uuid.uuid4(),
+            sensor_id or self.sensor.id,
+            medida,
+            mediciones or {"temperatura_c": 5},
+            latitud=-34.6,
+            longitud=-58.4,
+            origen="SIMULADOR",
+        )
         nueva = self.mon.registrar_lectura(entrada)
         resultado = self.mon.evaluar_pendientes(sensor_ids=[entrada.sensor_id]) if evaluar else None
         return entrada, nueva, resultado
 
     def alertas(self, tipo="TEMPERATURA", solo_activas=False):
-        return [a for a in self.mon.alertas(self.ops.sesion_id, solo_activas=solo_activas, envio_id=self.envio.id)
-                if a.tipo == tipo]
+        return [
+            a
+            for a in self.mon.alertas(self.ops.sesion_id, solo_activas=solo_activas, envio_id=self.envio.id)
+            if a.tipo == tipo
+        ]
 
     def incidentes(self):
         return self.mon.incidentes(self.ops.sesion_id, solo_abiertos=False, envio_id=self.envio.id)
@@ -91,11 +112,15 @@ def m(tx_connections):
 
 def outbox_incidentes(m):
     with m.conns.pg_session() as s:
-        return s.execute(text(
-            "SELECT e.evento_tipo, e.agregado_version, array_agg(x.destino) FROM outbox_evento e"
-            " JOIN outbox_entrega x ON x.evento_id = e.id JOIN incidente i ON i.id = e.agregado_id"
-            " WHERE e.agregado_tipo = 'INCIDENTE' AND i.envio_id = :e GROUP BY e.id ORDER BY e.agregado_version"),
-            {"e": m.envio.id}).all()
+        return s.execute(
+            text(
+                "SELECT e.evento_tipo, e.agregado_version, array_agg(x.destino) FROM outbox_evento e"
+                " JOIN outbox_entrega x ON x.evento_id = e.id JOIN incidente i ON i.id = e.agregado_id"
+                " WHERE e.agregado_tipo = 'INCIDENTE' AND i.envio_id = :e GROUP BY e.id ORDER BY "
+                "e.agregado_version"
+            ),
+            {"e": m.envio.id},
+        ).all()
 
 
 # --------------------------------------------------------------------------- escenario de aceptación
@@ -111,10 +136,15 @@ def test_temperatura_sostenida_abre_escala_con_incidente_y_normaliza_sin_resolve
     assert m.alertas()[0].severidad == "MEDIA" and m.incidentes() == []
     m.leer(300, temperatura_c=12)
     [alerta] = m.alertas()
-    assert alerta.severidad == "ALTA" and len(m.alertas()) == 1  # se actualiza la misma alerta, no se crea otra
+    assert (
+        alerta.severidad == "ALTA" and len(m.alertas()) == 1
+    )  # se actualiza la misma alerta, no se crea otra
     [incidente] = m.incidentes()
     assert (incidente.tipo, incidente.estado, incidente.alerta_origen_id) == (
-        "DESVIACION_TEMPERATURA", "ABIERTO", alerta.id)
+        "DESVIACION_TEMPERATURA",
+        "ABIERTO",
+        alerta.id,
+    )
     assert incidente.alertas == [alerta.id]  # vínculo en incidente_alerta, en la misma transacción
     assert outbox_incidentes(m) == [("INCIDENTE_ABIERTO", 1, ["MONGO_EVENTOS"])]  # SUPUESTO M1: sin Neo4j
     for seg in (360, 420):
@@ -144,8 +174,12 @@ def test_lectura_reenviada_no_se_duplica_ni_se_reevalua(m):
     assert m.mon.evaluar_pendientes(sensor_ids=m.sensores).evaluadas == 0
     assert m.conns.mongo_db["lecturas_sensor"].count_documents({"_id": entrada.id}) == 1
     with m.conns.pg_session() as s:
-        assert s.execute(text("SELECT count(*) FROM lectura_procesada WHERE lectura_id = :l"),
-                         {"l": entrada.id}).scalar_one() == 1
+        assert (
+            s.execute(
+                text("SELECT count(*) FROM lectura_procesada WHERE lectura_id = :l"), {"l": entrada.id}
+            ).scalar_one()
+            == 1
+        )
 
 
 def test_caida_entre_el_commit_y_la_marca_en_mongo_no_duplica_efectos(m, monkeypatch):
@@ -199,9 +233,13 @@ def test_reloj_adelantado_y_sin_contexto_quedan_para_revision(m):
     adelantada, _, r = m.leer(0, demora=-300)  # medida 300 s "después" de recibida
     assert r.revision == 1
     assert (m.evaluacion(adelantada.id)["estado"], m.evaluacion(adelantada.id)["resultado"]) == (
-        "ERROR", "RELOJ_ADELANTADO")
-    suelto = m.cat.crear_sensor(m.ops.sesion_id, SensorDatos(f"SUE-{m.sufijo}", "MULTISENSOR", "Acme",
-                                                              capacidades=frozenset({"TEMPERATURA"})))
+        "ERROR",
+        "RELOJ_ADELANTADO",
+    )
+    suelto = m.cat.crear_sensor(
+        m.ops.sesion_id,
+        SensorDatos(f"SUE-{m.sufijo}", "MULTISENSOR", "Acme", capacidades=frozenset({"TEMPERATURA"})),
+    )
     m.sensores.append(suelto.id)
     entrada, nueva, r = m.leer(60, sensor_id=suelto.id)  # sensor no instalado: se guarda igual
     doc = m.conns.mongo_db["lecturas_sensor"].find_one({"_id": entrada.id})
@@ -213,8 +251,9 @@ def test_mediciones_invalidas_se_rechazan_antes_de_guardar(m):
     with pytest.raises(ValidationError):
         m.leer(0, humedad_pct=140)
     with pytest.raises(ValidationError):
-        m.mon.registrar_lectura(LecturaEntrada(uuid.uuid4(), m.sensor.id, SALIDA, {"temperatura_c": 5},
-                                               latitud=95, longitud=0))
+        m.mon.registrar_lectura(
+            LecturaEntrada(uuid.uuid4(), m.sensor.id, SALIDA, {"temperatura_c": 5}, latitud=95, longitud=0)
+        )
 
 
 # --------------------------------------------------------------------------- sin comunicación
@@ -251,12 +290,21 @@ def test_reconocer_no_cierra_y_cerrar_a_mano_exige_motivo(m):
         m.mon.cerrar_alerta(s, alerta.id, "  ")
     cerrada = m.mon.cerrar_alerta(s, alerta.id, "Golpe en la grúa, carga revisada")
     assert (cerrada.estado, cerrada.cierre_tipo, cerrada.motivo_cierre) == (
-        "CERRADA", "MANUAL", "Golpe en la grúa, carga revisada")
+        "CERRADA",
+        "MANUAL",
+        "Golpe en la grúa, carga revisada",
+    )
     with m.conns.pg_session() as tx:
-        quien, cuando = tx.execute(text("SELECT cerrada_por_id, cerrada_en FROM alerta WHERE id = :id"),
-                                   {"id": alerta.id}).one()
-        acciones = tx.execute(text("SELECT accion FROM auditoria WHERE entidad_id = :id ORDER BY fecha"),
-                              {"id": alerta.id}).scalars().all()
+        quien, cuando = tx.execute(
+            text("SELECT cerrada_por_id, cerrada_en FROM alerta WHERE id = :id"), {"id": alerta.id}
+        ).one()
+        acciones = (
+            tx.execute(
+                text("SELECT accion FROM auditoria WHERE entidad_id = :id ORDER BY fecha"), {"id": alerta.id}
+            )
+            .scalars()
+            .all()
+        )
     assert quien is not None and cuando is not None
     assert acciones == ["reconocer_alerta", "cerrar_alerta"]
 
@@ -275,12 +323,19 @@ def test_incidente_manual_desde_alerta_y_resolucion(m):
     m.leer(0, vibracion_g=5)
     [alerta] = m.alertas("VIBRACION")
     s = m.ops.sesion_id
-    inc = m.mon.crear_incidente(s, m.envio.id, tipo="VIBRACION", severidad="MEDIA",
-                                descripcion="Impacto durante la carga", alerta_id=alerta.id)
+    inc = m.mon.crear_incidente(
+        s,
+        m.envio.id,
+        tipo="VIBRACION",
+        severidad="MEDIA",
+        descripcion="Impacto durante la carga",
+        alerta_id=alerta.id,
+    )
     assert inc.alertas == [alerta.id] and inc.tramo_id == m.t1.id
     with pytest.raises(BusinessRuleError):  # una alerta no origina dos incidentes
-        m.mon.crear_incidente(s, m.envio.id, tipo="VIBRACION", severidad="MEDIA", descripcion="otra vez",
-                              alerta_id=alerta.id)
+        m.mon.crear_incidente(
+            s, m.envio.id, tipo="VIBRACION", severidad="MEDIA", descripcion="otra vez", alerta_id=alerta.id
+        )
     assert m.mon.tomar_incidente(s, inc.id).estado == "EN_GESTION"
     with pytest.raises(ValidationError):
         m.mon.resolver_incidente(s, inc.id, "")
@@ -311,9 +366,12 @@ def test_permisos_y_alcance(m):
 def test_operador_solo_ve_lecturas_de_sus_tramos(m):
     m.leer(0)
     m.env.finalizar_tramo(m.ops.sesion_id, m.t1.id, SALIDA + timedelta(seconds=100))
-    # El tramo 2 pasa a otro operador antes de iniciarse: se reasigna en la base para no rehacer la planificación.
+    # El tramo 2 pasa a otro operador antes de iniciarse: se reasigna en la base para no rehacer la
+    # planificación.
     with m.conns.pg_session() as s:
-        s.execute(text("UPDATE tramo SET operador_id = :o WHERE id = :t"), {"o": m.operador2.id, "t": m.t2.id})
+        s.execute(
+            text("UPDATE tramo SET operador_id = :o WHERE id = :t"), {"o": m.operador2.id, "t": m.t2.id}
+        )
     m.leer(120)  # sin tramo en curso: no pertenece a ningún operador
     operador = m.login(m.emails["OPERADOR_LOGISTICO"]).sesion_id
     assert len(m.mon.lecturas(operador, campo="envio_id", valor=m.envio.id).lecturas) == 1
@@ -328,8 +386,13 @@ def test_historial_paginado_estable_y_con_indice(m):
     p2 = m.mon.lecturas(s, campo="sensor_id", valor=m.sensor.id, limite=2, despues=p1.siguiente)
     p3 = m.mon.lecturas(s, campo="sensor_id", valor=m.sensor.id, limite=2, despues=p2.siguiente)
     assert [x.id for x in p1.lecturas + p2.lecturas + p3.lecturas] == ids and p3.siguiente is None
-    rango = m.mon.lecturas(s, campo="sensor_id", valor=m.sensor.id, desde=SALIDA + timedelta(seconds=60),
-                           hasta=SALIDA + timedelta(seconds=180))
+    rango = m.mon.lecturas(
+        s,
+        campo="sensor_id",
+        valor=m.sensor.id,
+        desde=SALIDA + timedelta(seconds=60),
+        hasta=SALIDA + timedelta(seconds=180),
+    )
     assert [x.id for x in rango.lecturas] == ids[1:3]
     repo = LecturasRepository(m.conns)
     for campo, valor in (("sensor_id", m.sensor.id), ("envio_id", m.envio.id), ("contenedor_id", m.cont1.id)):
