@@ -30,5 +30,11 @@ REVOKE DELETE ON
     outbox_evento, movimiento_cuenta, cierre_cuenta, lectura_procesada, prediccion_riesgo
 FROM logistica_app_rw;
 
+-- Comercial (fase 6): facturas y pagos se ANULAN, nunca se borran; sus cargos, renglones, aplicaciones y cuentas
+-- son su trazabilidad. Así la regla no depende solo del código del servicio.
+REVOKE DELETE ON
+    factura, factura_detalle, pago, pago_aplicacion, cargo_envio, cuenta_corriente
+FROM logistica_app_rw;
+
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO logistica_app_rw;

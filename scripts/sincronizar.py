@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from logistica.core.config import load_config  # noqa: E402
 from logistica.core.logging_setup import setup_logging  # noqa: E402
 from logistica.repositories.connections import Connections  # noqa: E402
+from logistica.services.autorizacion import Autorizador  # noqa: E402
+from logistica.services.comercial_service import ComercialService  # noqa: E402
 from logistica.services.sincronizacion_service import SincronizacionService  # noqa: E402
 
 
@@ -47,7 +49,9 @@ def main() -> int:
         return 2
     setup_logging(config.log_dir, config.log_level)
     connections = Connections(config)
-    servicio = SincronizacionService(connections)
+    # Incluye la facturación automática (fase 6): este proceso también emite las facturas de las entregas.
+    comercial = ComercialService(connections, Autorizador(connections))
+    servicio = SincronizacionService(connections, facturacion=comercial.facturar_entrega)
     try:
         if args.estado:
             _mostrar(servicio.resumen())

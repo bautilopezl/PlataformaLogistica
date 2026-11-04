@@ -20,6 +20,7 @@ from logistica.domain.logistica_dtos import EventoOutboxDTO
 
 NEO4J = "NEO4J_LOGISTICA"
 MONGO = "MONGO_EVENTOS"
+FACTURACION = "FACTURACION"  # fase 6: facturación automática al confirmar la entrega (decisión B, §16.3)
 
 
 class OutboxRepository:

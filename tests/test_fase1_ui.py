@@ -170,6 +170,7 @@ def servicios(acceso=None, terceros=None, auditoria=None) -> Servicios:
         monitoreo=FakeMonitoreo(),
         trazabilidad=FakeTrazabilidad(),
         comunicacion=FakeComunicacion(),
+        comercial=object(),
     )
 
 
@@ -235,6 +236,7 @@ def _permisos_sembrados(rol: str) -> frozenset[str]:
                 "Trazabilidad",
                 "Catálogos",
                 "Monitoreo",
+                "Comercial",
                 "Terceros",
                 "Usuarios",
                 "Sesiones",
@@ -246,9 +248,9 @@ def _permisos_sembrados(rol: str) -> frozenset[str]:
             False,
             ["Estado", "Envíos", "Trazabilidad", "Catálogos", "Monitoreo", "Terceros", "Sesiones"],
         ),
-        ("COMERCIAL", False, ["Estado", "Envíos", "Trazabilidad", "Terceros", "Sesiones"]),
-        ("CLIENTE", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Sesiones"]),
-        ("OPERADOR_LOGISTICO", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Sesiones"]),
+        ("COMERCIAL", False, ["Estado", "Envíos", "Trazabilidad", "Comercial", "Terceros", "Sesiones"]),
+        ("CLIENTE", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Comercial", "Sesiones"]),
+        ("OPERADOR_LOGISTICO", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Comercial", "Sesiones"]),
     ],
 )
 def test_cada_perfil_ve_solo_sus_pestanias(qapp, rol, externo, esperadas):
@@ -455,6 +457,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
     from logistica.services.acceso_service import AccesoService
     from logistica.services.auditoria_service import AuditoriaService
     from logistica.services.catalogo_service import CatalogoService
+    from logistica.services.comercial_service import ComercialService
     from logistica.services.comunicacion_service import ComunicacionService
     from logistica.services.envio_service import EnvioService
     from logistica.services.monitoreo_service import MonitoreoService
@@ -482,6 +485,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         MonitoreoService(tx_connections, aut),
         TrazabilidadService(tx_connections, aut),
         ComunicacionService(tx_connections, aut),
+        ComercialService(tx_connections, aut),
     )
     sufijo = uuid.uuid4().hex[:8]
     with unit_of_work(tx_connections) as tx:
@@ -506,6 +510,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         "Chat",
         "Envíos",
         "Trazabilidad",
+        "Comercial",
         "Terceros",
         "Sesiones",
     ]  # COMERCIAL

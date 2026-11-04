@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from logistica.core.errors import DatabaseUnavailableError, LogisticaError
 from logistica.core.logging_setup import redact
@@ -28,7 +28,13 @@ from logistica.repositories.neo4j.proyeccion import ProyeccionRepository
 from logistica.repositories.postgres import unit_of_work
 from logistica.repositories.postgres.catalogos import UbicacionRepository
 from logistica.repositories.postgres.envios import AsignacionRepository, EnvioRepository, TramoRepository
-from logistica.repositories.postgres.outbox import MONGO, NEO4J, EntregaReclamada, OutboxRepository
+from logistica.repositories.postgres.outbox import (
+    FACTURACION,
+    MONGO,
+    NEO4J,
+    EntregaReclamada,
+    OutboxRepository,
+)
 
 log = logging.getLogger(__name__)
 
@@ -55,8 +61,13 @@ class SincronizacionService:
         neo4j: Connections | None = None,
         max_intentos: int = MAX_INTENTOS,
         reserva_s: float = RESERVA_S,
+        facturacion: Callable[[Any, uuid.UUID, uuid.UUID | None, uuid.UUID], Any] | None = None,
     ):
+        """`facturacion(tx, envio_id, usuario_id, evento_id)`: facturación automática (fase 6). Sin ella, las
+        entregas FACTURACION quedan pendientes (no se pierden) hasta que una instancia la tenga
+        configurada."""
         self._pg = connections
+        self._facturacion = facturacion
         self._outbox = OutboxRepository()
         self._eventos = EventosRepository(connections)
         self._proyeccion = ProyeccionRepository(neo4j or connections)
@@ -72,7 +83,8 @@ class SincronizacionService:
     def procesar_todo(self, *, limite: int = LOTE) -> dict[str, ResultadoLote]:
         """Una vuelta por cada destino. Un error en uno no impide procesar el otro."""
         resultados = {}
-        for destino in (MONGO, NEO4J):
+        destinos = (MONGO, NEO4J, FACTURACION) if self._facturacion is not None else (MONGO, NEO4J)
+        for destino in destinos:
             try:
                 resultados[destino] = self.procesar(destino, limite=limite)
             except Exception:  # por ejemplo, PostgreSQL caído: se reintenta en la próxima vuelta
@@ -152,6 +164,18 @@ class SincronizacionService:
             # 3) Recién aplicado el efecto se marca la entrega (al menos una vez).
             with unit_of_work(self._pg) as tx:
                 return self._completar(tx, entrega)
+        if entrega.destino == FACTURACION and self._facturacion is not None:
+            # Factura y entrega completada en UNA transacción: una reentrega o un segundo trabajador nunca
+            # facturan dos veces (además, los cargos se bloquean y un cargo no entra en dos facturas).
+            with unit_of_work(self._pg) as tx:
+                if not self._completar(tx, entrega):
+                    return False  # el reclamo ya no es nuestro: no se factura
+                envio_id = uuid.UUID(str(entrega.payload["envio_id"]))
+                usuario = entrega.payload.get("usuario_id")
+                self._facturacion(
+                    tx, envio_id, uuid.UUID(str(usuario)) if usuario else None, entrega.evento_id
+                )
+                return True
         raise ValueError(f"destino desconocido: {entrega.destino}")
 
     def _completar(self, tx: Any, entrega: EntregaReclamada) -> bool:

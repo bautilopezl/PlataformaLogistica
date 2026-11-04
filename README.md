@@ -78,6 +78,44 @@ LOGISTICA_TEST_CONNECTIONS=1 LOGISTICA_TEST_PG="host=localhost port=5432 dbname=
 | Fase 5 (trazabilidad y chat) | El grupo informó línea de tiempo del envío entregado, ruta ACTUALIZADA 8/8, asignación del contenedor/tramo y GPS vacío esperado. **Repitió Trazabilidad → Red:** aparece **Exportadora Demo SA**, el gráfico es legible y funciona **Ctrl+rueda**. No acredita trazabilidad completa ni permisos externos. Chat privado/grupal/público interno implementado, con pruebas automáticas de servicios, dos ventanas y dos procesos Qt con sesiones independientes; **chat manual del grupo pendiente** |
 
 Pendiente: prueba manual del grupo del chat y fases **6 a 9**, que no se implementaron en este corte.
+Estado al 4/11/2026: **509 pruebas en verde** con los tres motores (suite completa, salida 0), incluidas las 60 de la fase 6.
+
+**Decisión del grupo para la fase 6 (4/11/2026):** la facturación automática se genera **al confirmar la
+entrega de cada envío**: una factura por envío entregado, con sus cargos facturables. Siguen abiertas la
+numeración de comprobantes, las anulaciones y la moneda por defecto (`AGENTS.md` §16.3).
+
+## Comercial: facturación, pagos y cuentas (fase 6)
+
+**Circuito.** Comercial carga los **cargos** de un envío (lo que se le cobra al cliente; no es el costo del tramo).
+Operaciones confirma la entrega y, segundos después, la instancia interna abierta (o `scripts/sincronizar.py
+--continuo`) emite **una factura de venta por moneda** con los cargos pendientes. La factura, sus renglones, el
+estado de los cargos y el movimiento de la cuenta por cobrar quedan en **una sola transacción**, junto con la
+marca de la entrega `FACTURACION` de la outbox: una reentrega nunca factura dos veces. Si la facturación falla, la
+entrega del envío **igual queda confirmada** y la factura se reintenta.
+
+**Anular** nunca borra: la factura queda `ANULADA` con motivo y su movimiento se compensa con una reversa. No se
+anula con pagos aplicados (primero se anula la aplicación). Quien anula elige **refacturar**: sí crea cargos de
+reemplazo para facturar a mano en **Comercial → Cargos → Facturar pendientes**; no termina ahí.
+
+**Pagos.** Un cobro o pago disminuye la cuenta al registrarse y después se **aplica** a una o varias facturas
+(parcial o total), nunca por encima del disponible ni del saldo. **Cierre mensual**: en **Cuentas corrientes**,
+elegir la cuenta y **Cerrar período** (solo meses terminados; repetirlo devuelve el mismo cierre).
+
+**Quién ve qué.** Comercial y Administración operan; Operaciones no ve la pestaña. Un cliente ve solo sus
+facturas, cobros y su cuenta **por cobrar**; un operador solo lo que se le debe (**por pagar**).
+
+**Prueba manual sugerida (pendiente del grupo):** entrar como Comercial y cargar un cargo a un envío en tránsito;
+como Operaciones, confirmar la entrega; volver a **Comercial → Facturas** y ver la factura `FV-…`; registrar un
+cobro parcial, aplicarlo y ver el saldo en **Cuentas corrientes**; anular una factura con y sin refacturación.
+
+**Pruebas automáticas de este corte:** `tests/test_fase6_dominio.py` (sin base),
+`tests/test_fase6_comercial.py` (PostgreSQL real en transacción revertida), `tests/test_fase6_ui.py` (Qt
+offscreen) y `tests/test_fase6_concurrencia.py`, que crea una **base PostgreSQL temporal** con nombre UUID, aplica
+`db/postgres/*.sql`, corre carreras con **dos conexiones reales** (doble facturación, sobre-aplicación, cierre
+repetido, numeración simultánea) y la elimina al terminar. Los movimientos y la auditoría son inmutables, por eso
+esas carreras no usan la base de desarrollo. Supuestos C1–C7 en `AGENTS.md` §16.
+
+**Cambio de esquema de este corte:** `db/postgres/900_grants.sql` quita a la identidad de ejecución el DELETE sobre `factura`, `factura_detalle`, `pago`, `pago_aplicacion`, `cargo_envio` y `cuenta_corriente` (se anulan, nunca se borran). Es idempotente: aplicarlo con `python scripts/setup_databases.py --only postgres`.
 
 ## Probar monitoreo desde la ventana (fase 4)
 

@@ -59,7 +59,7 @@ from logistica.repositories.postgres.envios import (
     EnvioRepository,
     TramoRepository,
 )
-from logistica.repositories.postgres.outbox import MONGO, NEO4J, OutboxRepository
+from logistica.repositories.postgres.outbox import FACTURACION, MONGO, NEO4J, OutboxRepository
 from logistica.repositories.postgres.terceros import TerceroRepository
 from logistica.services import auditoria
 from logistica.services.autorizacion import Autorizador
@@ -504,7 +504,7 @@ class EnvioService:
                 envio,
                 version,
                 "ENVIO_ENTREGADO",
-                (MONGO, NEO4J),
+                (MONGO, NEO4J, FACTURACION),  # FACTURACION: la factura la emite el consumidor (§16.3)
                 self._doc_evento(
                     tx,
                     envio,

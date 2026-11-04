@@ -37,6 +37,7 @@ from logistica.ui.usuarios_view import UsuariosView
 from logistica.ui.auditoria_view import AuditoriaView
 from logistica.ui.catalogos_view import CatalogosView
 from logistica.ui.chat_view import ChatView
+from logistica.ui.comercial_view import ComercialView
 from logistica.ui.envios_view import EnviosView
 from logistica.ui.monitoreo_view import MonitoreoView
 from logistica.ui.trazabilidad_view import TrazabilidadView
@@ -106,6 +107,10 @@ class MainWindow(QMainWindow):
         if principal.tiene_permiso(Permiso.MONITOREO_CONSULTAR):
             self.monitoreo = MonitoreoView(servicios.monitoreo, servicios.envios, principal)
             self._agregar(self.monitoreo, "Monitoreo")
+        if principal.tiene_permiso(Permiso.CUENTAS_CONSULTAR, Permiso.FACTURAS_EMITIR):
+            self._agregar(
+                ComercialView(servicios.comercial, servicios.envios, servicios.terceros, principal), "Comercial"
+            )
         if principal.tiene_permiso(*PERMISOS_CONSULTA_TERCEROS):
             self._agregar(
                 TercerosView(

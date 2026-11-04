@@ -14,6 +14,7 @@ from logistica.repositories.connections import Connections
 from logistica.services.acceso_service import AccesoService
 from logistica.services.auditoria_service import AuditoriaService
 from logistica.services.catalogo_service import CatalogoService
+from logistica.services.comercial_service import ComercialService
 from logistica.services.comunicacion_service import ComunicacionService
 from logistica.services.envio_service import EnvioService
 from logistica.services.monitoreo_service import MonitoreoService
@@ -38,12 +39,14 @@ class Servicios:
     monitoreo: MonitoreoService
     trazabilidad: TrazabilidadService
     comunicacion: ComunicacionService
+    comercial: ComercialService
 
 
 def crear_servicios(config: AppConfig, connections: Connections, instancia_id: uuid.UUID) -> Servicios:
     s = config.security
     hasher = Hasher(s.argon2_time_cost, s.argon2_memory_kib, s.argon2_parallelism)
     autorizador = Autorizador(connections)
+    comercial = ComercialService(connections, autorizador)
     return Servicios(
         salud=HealthService(connections, timeout_s=config.db_timeout_s),
         acceso=AccesoService(connections, hasher, s, instancia_id, autorizador),
@@ -51,9 +54,10 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
         terceros=TerceroService(connections, autorizador),
         auditoria=AuditoriaService(connections, autorizador),
         catalogo=CatalogoService(connections, autorizador),
-        sincronizacion=SincronizacionService(connections),
+        sincronizacion=SincronizacionService(connections, facturacion=comercial.facturar_entrega),
         envios=EnvioService(connections, autorizador),
         monitoreo=MonitoreoService(connections, autorizador),
         trazabilidad=TrazabilidadService(connections, autorizador),
         comunicacion=ComunicacionService(connections, autorizador),
+        comercial=comercial,
     )
