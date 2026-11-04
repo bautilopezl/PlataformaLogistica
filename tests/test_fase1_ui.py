@@ -103,6 +103,24 @@ class FakeEnvios:
         return []
 
 
+class FakeTrazabilidad:
+    pass
+
+
+class FakeComunicacion:
+    def vista(self, sesion, ident=None, **kwargs):
+        from logistica.domain.comunicacion import VistaChatDTO
+
+        return VistaChatDTO((), (), None)
+
+
+class FakeMonitoreo:
+    def procesar_ciclo(self, sesion_id, detener):
+        from logistica.services.monitoreo_service import ResultadoEvaluacion
+
+        return ResultadoEvaluacion(), 0
+
+
 class FakeAuditoria:
     """Devuelve `total` registros de a páginas, como el servicio real (más recientes primero)."""
 
@@ -149,7 +167,9 @@ def servicios(acceso=None, terceros=None, auditoria=None) -> Servicios:
         catalogo=object(),
         envios=FakeEnvios(),
         sincronizacion=FakeSincronizacion(),
-        monitoreo=object(),
+        monitoreo=FakeMonitoreo(),
+        trazabilidad=FakeTrazabilidad(),
+        comunicacion=FakeComunicacion(),
     )
 
 
@@ -209,12 +229,26 @@ def _permisos_sembrados(rol: str) -> frozenset[str]:
         (
             "ADMINISTRADOR",
             False,
-            ["Estado", "Envíos", "Catálogos", "Terceros", "Usuarios", "Sesiones", "Auditoría"],
+            [
+                "Estado",
+                "Envíos",
+                "Trazabilidad",
+                "Catálogos",
+                "Monitoreo",
+                "Terceros",
+                "Usuarios",
+                "Sesiones",
+                "Auditoría",
+            ],
         ),
-        ("OPERACIONES", False, ["Estado", "Envíos", "Catálogos", "Terceros", "Sesiones"]),
-        ("COMERCIAL", False, ["Estado", "Envíos", "Terceros", "Sesiones"]),
-        ("CLIENTE", True, ["Estado", "Envíos", "Sesiones"]),
-        ("OPERADOR_LOGISTICO", True, ["Estado", "Envíos", "Sesiones"]),
+        (
+            "OPERACIONES",
+            False,
+            ["Estado", "Envíos", "Trazabilidad", "Catálogos", "Monitoreo", "Terceros", "Sesiones"],
+        ),
+        ("COMERCIAL", False, ["Estado", "Envíos", "Trazabilidad", "Terceros", "Sesiones"]),
+        ("CLIENTE", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Sesiones"]),
+        ("OPERADOR_LOGISTICO", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Sesiones"]),
     ],
 )
 def test_cada_perfil_ve_solo_sus_pestanias(qapp, rol, externo, esperadas):
@@ -222,7 +256,7 @@ def test_cada_perfil_ve_solo_sus_pestanias(qapp, rol, externo, esperadas):
 
     p = principal({rol}, _permisos_sembrados(rol), tercero_id=uuid.uuid4() if externo else None)
     ventana = MainWindow(servicios(), p)
-    assert ventana.titulos_pestanias() == esperadas
+    assert ventana.titulos_pestanias() == [esperadas[0], "Chat", *esperadas[1:]]
     ventana.close()
 
 
@@ -421,9 +455,11 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
     from logistica.services.acceso_service import AccesoService
     from logistica.services.auditoria_service import AuditoriaService
     from logistica.services.catalogo_service import CatalogoService
+    from logistica.services.comunicacion_service import ComunicacionService
     from logistica.services.envio_service import EnvioService
     from logistica.services.monitoreo_service import MonitoreoService
     from logistica.services.sincronizacion_service import SincronizacionService
+    from logistica.services.trazabilidad_service import TrazabilidadService
     from logistica.services.autorizacion import Autorizador
     from logistica.services.health_service import HealthService
     from logistica.services.tercero_service import TerceroService
@@ -444,6 +480,8 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         EnvioService(tx_connections, aut),
         SincronizacionService(tx_connections),
         MonitoreoService(tx_connections, aut),
+        TrazabilidadService(tx_connections, aut),
+        ComunicacionService(tx_connections, aut),
     )
     sufijo = uuid.uuid4().hex[:8]
     with unit_of_work(tx_connections) as tx:
@@ -463,7 +501,14 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
     assert esperar(qapp, lambda: dialogo.result() == QDialog.DialogCode.Accepted)
 
     ventana = MainWindow(reales, dialogo.principal)
-    assert ventana.titulos_pestanias() == ["Estado", "Envíos", "Terceros", "Sesiones"]  # COMERCIAL
+    assert ventana.titulos_pestanias() == [
+        "Estado",
+        "Chat",
+        "Envíos",
+        "Trazabilidad",
+        "Terceros",
+        "Sesiones",
+    ]  # COMERCIAL
     reales.terceros.crear(
         dialogo.principal.sesion_id,
         TerceroDatos(f"Cliente UI {sufijo}", "AR", "CUIT", f"30-{sufijo}"),
@@ -542,3 +587,63 @@ def test_la_sincronizacion_corre_solo_para_internos_y_muestra_el_estado(qapp):
     interno.close()
     assert not interno.sincronizacion_activa()  # al cerrar se detiene
     externo.close()
+
+
+def test_trazabilidad_consulta_fuera_del_hilo_grafico_y_muestra_errores(qapp):
+    from datetime import datetime, timezone
+
+    from PySide6.QtCore import QCoreApplication, QEvent, QThread
+
+    from logistica.core.errors import DatabaseUnavailableError
+    from logistica.domain.trazabilidad_dtos import EventoTrazabilidadDTO, PaginaEventosDTO
+    from logistica.ui.trazabilidad_view import TrazabilidadView
+
+    class FakeTrazabilidad:
+        def __init__(self):
+            self.hilo_consulta = None
+            self.fallar = False
+
+        def eventos(self, *args, **kwargs):
+            assert len(args) == 2 and kwargs["limite"] == 50
+            self.hilo_consulta = QThread.currentThread()
+            if self.fallar:
+                raise DatabaseUnavailableError("MongoDB")
+            ahora = datetime.now(timezone.utc)
+            evento = EventoTrazabilidadDTO(
+                uuid.uuid4(),
+                ahora,
+                ahora,
+                "RETRASO",
+                "Demora informada",
+                None,
+                None,
+                (),
+                {"motivo": "prueba"},
+                "EN_MONGO_SIN_OUTBOX",
+            )
+            return PaginaEventosDTO([evento], None, 1, 0)
+
+    class FakeEnvios:
+        pass
+
+    servicio = FakeTrazabilidad()
+    vista = TrazabilidadView(servicio, FakeEnvios(), uuid.uuid4())
+    vista.selector_envio.blockSignals(True)
+    vista.selector_envio.addItem("ENV-PRUEBA", uuid.uuid4())
+    vista.selector_envio.blockSignals(False)
+    vista._buscar_eventos()
+
+    assert esperar(qapp, lambda: not vista.ocupado())
+    assert servicio.hilo_consulta != qapp.thread()
+    assert vista.tabla_eventos.rowCount() == 1
+    assert "Outbox Mongo: 1" in vista.estado_eventos.text()
+
+    servicio.fallar = True
+    vista._buscar_eventos()
+    assert esperar(qapp, lambda: not vista.ocupado())
+    assert "No se pudo acceder a MongoDB" in vista.estado.text()
+    vista.cerrar()
+    vista.close()
+    vista.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qapp.processEvents()

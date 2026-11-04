@@ -50,7 +50,7 @@ class _Llamada(QObject):
         self._vista, self._on_ok = vista, on_ok
 
     def _viva(self) -> bool:
-        return shiboken6.isValid(self._vista)
+        return shiboken6.isValid(self._vista) and not self._vista._cerrando
 
     @Slot(object)
     def ok(self, resultado: Any) -> None:

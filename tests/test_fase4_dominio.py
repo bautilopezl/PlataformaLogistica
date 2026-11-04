@@ -26,6 +26,13 @@ CONDICION = m.Condicion(temperatura_min_c=Decimal("2"), temperatura_max_c=Decima
 def s(n: float) -> datetime:
     return T0 + timedelta(seconds=n)
 
+@pytest.mark.parametrize("valor", ["NaN", "Infinity", "-Infinity"])
+def test_condiciones_no_admiten_umbrales_no_finitos(valor):
+    from logistica.domain.monitoreo_dtos import CondicionDatos
+
+    with pytest.raises(m.ValidationError):
+        m.validar_condicion(CondicionDatos(temperatura_min_c=valor))
+
 
 def lectura(seg: float, *, recibida: float | None = None, contexto=CONTEXTO, lid=None, **mediciones):
     return m.Lectura(id=lid or uuid.uuid4(), sensor_id=SENSOR, fecha_medicion=s(seg),

@@ -39,6 +39,7 @@ def test_indices_mongo_exigidos_por_el_diseno():
     nombres = {n for idx in setup_mongo.INDICES.values() for _, n, _ in idx}
     assert "ix_lectura_posicion_2dsphere" in nombres      # visualización geográfica
     assert "ix_lectura_sensor_fecha" in nombres           # consulta histórica por sensor
+    assert "ix_evento_envio_fecha_id" in nombres          # paginación estable del histórico
     assert "ix_mensaje_conversacion_fecha_id" in nombres  # paginación estable del chat
 
 

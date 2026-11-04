@@ -15,9 +15,11 @@ retroceder la proyección).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from logistica.domain.grafo import EnvioGrafo
+from logistica.domain.trazabilidad_dtos import ProyeccionRutaDTO, TramoProyectadoDTO
 from logistica.repositories.neo4j import Neo4jRepository
 
 # Primero se TOMA EL LOCK de escritura del nodo (SET/REMOVE de una propiedad auxiliar) y recién después se
@@ -87,6 +89,36 @@ MERGE (k:Contenedor {id: a.contenedor_id})
 SET k.codigo_internacional = a.codigo
 MERGE (e)-[u:UTILIZA {asignacion_id: a.id}]->(k)
 SET u.desde = a.desde, u.hasta = a.hasta, u.estado = a.estado
+"""
+
+_RUTA = """
+MATCH (e:Envio {id: $envio_id})
+OPTIONAL MATCH (e)-[:TIENE_TRAMO]->(t:Tramo)
+OPTIONAL MATCH (t)-[:SALE_DE]->(o:Ubicacion)
+OPTIONAL MATCH (t)-[:LLEGA_A]->(d:Ubicacion)
+OPTIONAL MATCH (op:Operador)-[:OPERA]->(t)
+RETURN e.codigo AS codigo, e.estado AS estado, e.version AS version,
+       t.id AS tramo_id, t.orden AS orden, o.id AS origen_id, o.nombre AS origen_nombre,
+       d.id AS destino_id, d.nombre AS destino_nombre, op.id AS operador_id,
+       op.razon_social AS operador_razon_social, t.medio AS medio, t.estado AS estado_tramo,
+       t.vehiculo AS vehiculo, t.salida_estimada_en AS salida_estimada_en,
+       t.llegada_estimada_en AS llegada_estimada_en, t.salida_real_en AS salida_real_en,
+       t.llegada_real_en AS llegada_real_en
+ORDER BY orden, tramo_id
+LIMIT $limite
+"""
+
+_RED = """
+MATCH (c:Cliente)-[:SOLICITA]->(e:Envio)-[:TIENE_TRAMO]->(t:Tramo)<-[:OPERA]-(op:Operador)
+WHERE e.id IN $envio_ids
+  AND ($cliente_id IS NULL OR c.id = $cliente_id)
+  AND ($operador_id IS NULL OR op.id = $operador_id)
+RETURN DISTINCT c.id AS cliente_id, c.razon_social AS cliente_razon_social,
+       e.id AS envio_id, e.codigo AS envio_codigo, e.version AS version_proyectada,
+       t.id AS tramo_id, t.orden AS tramo_orden, op.id AS operador_id,
+       op.razon_social AS operador_razon_social
+ORDER BY envio_codigo, tramo_orden, cliente_id, operador_id
+LIMIT $limite
 """
 
 
@@ -159,6 +191,79 @@ class ProyeccionRepository(Neo4jRepository):
             "tramos_huerfanos": huerfanos,
         }
 
+    def ruta(self, envio_id: uuid.UUID, *, limite: int = 201) -> ProyeccionRutaDTO | None:
+        """Lee la ruta proyectada en Neo4j; nunca sustituye un grafo ausente por datos relacionales."""
+        with self._session() as s:
+            filas = s.run(_RUTA, envio_id=str(envio_id), limite=limite).data()
+        if not filas:
+            return None
+        primera = filas[0]
+        tramos = [
+            TramoProyectadoDTO(
+                id=uuid.UUID(str(fila["tramo_id"])),
+                orden=fila["orden"],
+                origen_id=uuid.UUID(str(fila["origen_id"])),
+                origen_nombre=fila["origen_nombre"],
+                destino_id=uuid.UUID(str(fila["destino_id"])),
+                destino_nombre=fila["destino_nombre"],
+                operador_id=uuid.UUID(str(fila["operador_id"])),
+                operador_razon_social=fila["operador_razon_social"],
+                medio=fila["medio"],
+                estado=fila["estado_tramo"],
+                vehiculo=fila["vehiculo"],
+                salida_estimada_en=_fecha(fila["salida_estimada_en"]),
+                llegada_estimada_en=_fecha(fila["llegada_estimada_en"]),
+                salida_real_en=_fecha(fila["salida_real_en"]),
+                llegada_real_en=_fecha(fila["llegada_real_en"]),
+            )
+            for fila in filas
+            if fila["tramo_id"] is not None
+        ]
+        return ProyeccionRutaDTO(
+            codigo=primera["codigo"],
+            estado=primera["estado"],
+            version=primera["version"],
+            tramos=tramos,
+        )
+
+    def red(
+        self,
+        *,
+        envio_ids: list[uuid.UUID],
+        cliente_id: uuid.UUID | None,
+        operador_id: uuid.UUID | None,
+        limite: int,
+    ) -> list[dict[str, Any]]:
+        """Consulta relaciones de una profundidad fija entre cliente, envío y operador."""
+        if not envio_ids:
+            return []
+        with self._session() as s:
+            return s.run(
+                _RED,
+                envio_ids=[str(envio_id) for envio_id in envio_ids],
+                cliente_id=str(cliente_id) if cliente_id else None,
+                operador_id=str(operador_id) if operador_id else None,
+                limite=limite,
+            ).data()
+
+    def versiones(self, envio_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+        if not envio_ids:
+            return {}
+        with self._session() as s:
+            filas = s.run(
+                """
+                UNWIND $ids AS id
+                OPTIONAL MATCH (e:Envio {id: id})
+                RETURN id, e.version AS version
+                """,
+                ids=[str(envio_id) for envio_id in envio_ids],
+            ).data()
+        return {
+            uuid.UUID(str(fila["id"])): fila["version"]
+            for fila in filas
+            if fila["version"] is not None
+        }
+
 
 def _aplicar(tx: Any, g: EnvioGrafo, forzar: bool) -> bool:
     """Todo en UNA transacción de Neo4j: o se aplica el subgrafo completo, o nada."""
@@ -169,3 +274,10 @@ def _aplicar(tx: Any, g: EnvioGrafo, forzar: bool) -> bool:
     tx.run(_SIGUIENTES, pares=g.siguientes).consume()
     tx.run(_USOS, envio_id=g.envio["id"], asignacion_ids=[u["id"] for u in g.usos], usos=g.usos).consume()
     return True
+
+
+def _fecha(valor: Any) -> datetime | None:
+    if valor is None:
+        return None
+    fecha = valor if isinstance(valor, datetime) else datetime.fromisoformat(str(valor))
+    return fecha

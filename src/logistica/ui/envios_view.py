@@ -280,6 +280,10 @@ class EnvioDetalleView(VistaBase):
         layout = QVBoxLayout(self)
         layout.addWidget(self.cabecera)
         layout.addWidget(self.datos)
+        if planificar:
+            layout.addWidget(QLabel(
+                "Definí las condiciones antes de iniciar: pestaña Monitoreo → seleccioná este envío "
+                "→ Condiciones antes de salir."))
         layout.addWidget(QLabel("Tramos"))
         layout.addWidget(self.tramos, 3)
         layout.addWidget(QLabel("Contenedores"))

@@ -1,0 +1,21 @@
+Base geografica local: Natural Earth, ne_110m_land, version 5.1.2.
+Fuente:
+https://github.com/nvkelso/natural-earth-vector/blob/v5.1.2/geojson/ne_110m_land.geojson
+Descarga:
+https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_110m_land.geojson
+
+Dominio publico. Terminos originales:
+https://www.naturalearthdata.com/about/terms-of-use/
+
+All versions of Natural Earth raster + vector map data found on this website
+are in the public domain. You may use the maps in any manner, including
+modifying the content and design, electronic dissemination, and offset printing.
+
+Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.
+Autores principales: Tom Patterson y Nathaniel Vaughn Kelso.
+
+Se distribuye el GeoJSON sin modificar para dibujar tierra y costas a escala
+1:110 millones con QPainterPath. No contiene mapas de calles ni garantiza
+precision local; no es una herramienta de navegacion.
+La aplicacion no descarga recursos, no abre servidores y no accede a servicios
+cartograficos. Los nombres de ciudades son referencias numericas aproximadas.

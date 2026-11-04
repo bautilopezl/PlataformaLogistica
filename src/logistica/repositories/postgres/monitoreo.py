@@ -112,11 +112,15 @@ class EstadoSensorRepository:
                 """
                 SELECT s.id, s.codigo, s.estado, k.codigo_internacional, e.id, e.codigo, sem.ultima_medicion_en,
                        CASE WHEN e.estado = 'EN_TRANSITO' AND ec.estado = 'EN_USO' THEN
-                            extract(epoch FROM clock_timestamp()
+                            greatest(0, extract(epoch FROM clock_timestamp()
                                     - greatest(ec.uso_desde, sc.instalado_en,
-                                               coalesce(sem.ultima_medicion_en, '-infinity')))::int END,
+                                               coalesce(sem.ultima_medicion_en, '-infinity')))::int) END,
                        coalesce(cm.tiempo_max_sin_lecturas_seg, 180),
-                       (SELECT count(*) FROM alerta a WHERE a.sensor_id = s.id AND a.estado <> 'CERRADA')
+                       (SELECT count(*) FROM alerta a WHERE a.sensor_id = s.id AND a.estado <> 'CERRADA'
+                          AND (CAST(:cliente AS uuid) IS NULL AND CAST(:operador AS uuid) IS NULL
+                               OR a.envio_id = e.id AND (e.cliente_id = :cliente OR EXISTS
+                                   (SELECT 1 FROM tramo t WHERE t.id = a.tramo_id
+                                    AND t.operador_id = :operador))))
                 FROM sensor s
                 LEFT JOIN sensor_contenedor sc ON sc.sensor_id = s.id AND sc.retirado_en IS NULL
                 LEFT JOIN contenedor k ON k.id = sc.contenedor_id
@@ -124,10 +128,13 @@ class EstadoSensorRepository:
                 LEFT JOIN envio e ON e.id = ec.envio_id
                 LEFT JOIN condicion_monitoreo cm ON cm.envio_id = e.id
                 LEFT JOIN sensor_estado_monitoreo sem ON sem.sensor_id = s.id
+                     AND sem.evaluacion_condiciones->'contexto'->>'envio_id' = e.id::text
+                     AND sem.evaluacion_condiciones->'contexto'->>'asignacion_sensor_id' = sc.id::text
                 WHERE (CAST(:envio AS uuid) IS NULL OR e.id = :envio)
                   AND ((CAST(:cliente AS uuid) IS NULL AND CAST(:operador AS uuid) IS NULL)
                        OR e.cliente_id = :cliente
-                       OR EXISTS (SELECT 1 FROM tramo t WHERE t.envio_id = e.id AND t.operador_id = :operador))
+                       OR EXISTS (SELECT 1 FROM tramo t WHERE t.envio_id = e.id AND t.estado = 'EN_CURSO'
+                                  AND t.operador_id = :operador))
                 ORDER BY s.codigo LIMIT :limite
                 """
             ),
@@ -176,6 +183,8 @@ class EstadoSensorRepository:
                 JOIN envio_contenedor ec ON ec.contenedor_id = sc.contenedor_id AND ec.estado = 'EN_USO'
                 JOIN envio e ON e.id = ec.envio_id AND e.estado = 'EN_TRANSITO'
                 LEFT JOIN sensor_estado_monitoreo sem ON sem.sensor_id = sc.sensor_id
+                     AND sem.evaluacion_condiciones->'contexto'->>'envio_id' = e.id::text
+                     AND sem.evaluacion_condiciones->'contexto'->>'asignacion_sensor_id' = sc.id::text
                 WHERE sc.retirado_en IS NULL
                   AND (CAST(:ids AS uuid[]) IS NULL OR sc.sensor_id = ANY(CAST(:ids AS uuid[])))
                 ORDER BY sc.sensor_id

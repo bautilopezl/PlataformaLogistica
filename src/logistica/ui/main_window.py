@@ -7,6 +7,7 @@ permiso y alcance en cada operación.
 from __future__ import annotations
 
 import logging
+from threading import Event
 
 from PySide6.QtCore import QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent
@@ -35,12 +36,16 @@ from logistica.ui.terceros_view import TercerosView
 from logistica.ui.usuarios_view import UsuariosView
 from logistica.ui.auditoria_view import AuditoriaView
 from logistica.ui.catalogos_view import CatalogosView
+from logistica.ui.chat_view import ChatView
 from logistica.ui.envios_view import EnviosView
+from logistica.ui.monitoreo_view import MonitoreoView
+from logistica.ui.trazabilidad_view import TrazabilidadView
 from logistica.ui.worker import WorkerPool
 
 log = logging.getLogger(__name__)
 SHUTDOWN_WAIT_MS = 10_000
 SYNC_MS = 10_000  # SUPUESTO (AGENTS.md §16.6): frecuencia de sincronización, a medir
+MONITOREO_MS = 60_000  # frecuencia de revisión de comunicación de AGENTS.md §10.4
 
 
 class MainWindow(QMainWindow):
@@ -56,7 +61,10 @@ class MainWindow(QMainWindow):
         self.principal = principal
         self._pool = WorkerPool(self)
         self._sincronizando = False
+        self._procesando_monitoreo = False
+        self._detener_monitoreo = Event()
         self._terminada = False
+        self._mensaje_terminacion: str | None = None
 
         usuario = QLabel(f"{principal.nombre_completo} · {', '.join(sorted(principal.roles))}")
         self.boton_password = QPushButton("Cambiar contraseña")
@@ -73,6 +81,8 @@ class MainWindow(QMainWindow):
         self.estado = EstadoView(servicios.salud)
         self.tabs.addTab(self.estado, "Estado")
         self.vistas: list = []
+        self.chat = ChatView(servicios.comunicacion, principal)
+        self._agregar(self.chat, "Chat")
         if principal.tiene_permiso(Permiso.ENVIOS_CONSULTAR):
             self._agregar(
                 EnviosView(
@@ -84,10 +94,18 @@ class MainWindow(QMainWindow):
                 ),
                 "Envíos",
             )
+            self._agregar(
+                TrazabilidadView(servicios.trazabilidad, servicios.envios, principal.sesion_id),
+                "Trazabilidad",
+            )
         if principal.es_interno and principal.tiene_permiso(Permiso.ENVIOS_PLANIFICAR, Permiso.ENVIOS_CREAR):
             self._agregar(
                 CatalogosView(servicios.catalogo, servicios.terceros, principal.sesion_id), "Catálogos"
             )
+        self.monitoreo: MonitoreoView | None = None
+        if principal.tiene_permiso(Permiso.MONITOREO_CONSULTAR):
+            self.monitoreo = MonitoreoView(servicios.monitoreo, servicios.envios, principal)
+            self._agregar(self.monitoreo, "Monitoreo")
         if principal.tiene_permiso(*PERMISOS_CONSULTA_TERCEROS):
             self._agregar(
                 TercerosView(
@@ -116,7 +134,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(cabecera)
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
-        self.resize(900, 560)
+        self.resize(1180, 720)
 
         # Fase 3: mientras un usuario INTERNO tiene la app abierta, esta instancia procesa la outbox
         # (Mongo y Neo4j) cada SYNC_MS, fuera del hilo gráfico. Varias instancias a la vez no se pisan:
@@ -125,6 +143,13 @@ class MainWindow(QMainWindow):
         self._timer_sync.timeout.connect(self.sincronizar)
         if principal.es_interno:
             self._timer_sync.start(SYNC_MS)
+        self.estado_monitoreo = QLabel("Monitoreo: esta instancia no procesa")
+        self.statusBar().addPermanentWidget(self.estado_monitoreo)
+        self._timer_monitoreo = QTimer(self)
+        self._timer_monitoreo.timeout.connect(self.procesar_monitoreo)
+        if principal.es_interno and principal.tiene_permiso(Permiso.ENVIOS_PLANIFICAR):
+            self._timer_monitoreo.start(MONITOREO_MS)
+            QTimer.singleShot(0, self.procesar_monitoreo)
 
     def titulos_pestanias(self) -> list[str]:
         return [self.tabs.tabText(i) for i in range(self.tabs.count())]
@@ -178,8 +203,8 @@ class MainWindow(QMainWindow):
             if siguiente is modal:
                 break
             modal = siguiente
+        self._mensaje_terminacion = mensaje
         self.close()
-        self.sesion_terminada.emit(mensaje)
 
     def cambiar_password(self) -> None:
         dialogo = CambiarPasswordDialog(self)
@@ -238,8 +263,46 @@ class MainWindow(QMainWindow):
         self._sincronizando = False
         self.statusBar().showMessage(f"Sincronización detenida: {mensaje}")
 
+    @Slot()
+    def procesar_monitoreo(self) -> None:
+        if (self._procesando_monitoreo or self._terminada or self._detener_monitoreo.is_set()
+                or not self._timer_monitoreo.isActive()):
+            return
+        self._procesando_monitoreo = True
+        self._pool.submit(
+            self._servicios.monitoreo.procesar_ciclo, self._monitoreo_ok, self._monitoreo_error,
+            self.principal.sesion_id, self._detener_monitoreo, on_session_expired=self.terminar,
+        )
+
+    @Slot(object)
+    def _monitoreo_ok(self, resultado: tuple) -> None:
+        self._procesando_monitoreo = False
+        if self._terminada:
+            return
+        lecturas, cambios = resultado
+        self.estado_monitoreo.setText(
+            f"Monitoreo: {lecturas.evaluadas} evaluadas · {cambios} cambios de comunicación"
+            f" · {lecturas.revision} revisión · {lecturas.reintentos} reintentos"
+        )
+        if self.monitoreo is not None and self.tabs.currentWidget() is self.monitoreo:
+            self.monitoreo.refrescar_datos()
+
+    @Slot(str)
+    def _monitoreo_error(self, mensaje: str) -> None:
+        self._procesando_monitoreo = False
+        if not self._terminada:
+            self.estado_monitoreo.setText(f"Monitoreo pendiente (se reintentará): {mensaje}")
+
     def closeEvent(self, event: QCloseEvent) -> None:
         self._timer_sync.stop()
+        self._timer_monitoreo.stop()
+        self._detener_monitoreo.set()
+        self.chat.cerrar()
+        if self.chat.trabajadores_activos():
+            self.setEnabled(False)
+            event.ignore()
+            QTimer.singleShot(50, self.close)
+            return
         for vista in (self.estado, *self.vistas):
             vista.cerrar()  # no aceptan trabajo nuevo y esperan lo que está en curso
         cerrada_por_el_usuario = not self._terminada
@@ -252,6 +315,9 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
         if cerrada_por_el_usuario:
             self.salir.emit()
+        elif self._mensaje_terminacion is not None:
+            mensaje, self._mensaje_terminacion = self._mensaje_terminacion, None
+            self.sesion_terminada.emit(mensaje)
 
 
 def _nada(_valor: object) -> None:

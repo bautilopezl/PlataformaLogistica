@@ -56,20 +56,21 @@ def _sembrar(conn):
 def test_script_particiona_conservando_datos_e_idempotente(conn):
     if relkind(conn, "lectura_procesada") != "r":
         pytest.skip("la base ya tiene el particionamiento activado")
+    existentes = conn.execute("SELECT count(*) FROM lectura_procesada").fetchone()[0]
     lecturas, evento = _sembrar(conn)
 
     conn.execute(_sql())
     assert relkind(conn, "lectura_procesada") == "p" and relkind(conn, "outbox_entrega") == "p"
     parts = conn.execute("SELECT count(*) FROM pg_inherits WHERE inhparent = 'lectura_procesada'::regclass").fetchone()[0]
     assert parts == 4
-    assert conn.execute("SELECT count(*) FROM lectura_procesada").fetchone()[0] == 20
+    assert conn.execute("SELECT count(*) FROM lectura_procesada").fetchone()[0] == existentes + len(lecturas)
     assert conn.execute("SELECT count(*) FROM outbox_entrega WHERE evento_id = %s", (evento,)).fetchone()[0] == 2
     # los datos se reparten entre varias particiones
     usadas = conn.execute("SELECT count(DISTINCT tableoid) FROM lectura_procesada").fetchone()[0]
     assert usadas > 1
 
     conn.execute(_sql())  # segunda ejecución: no hace nada y no falla
-    assert conn.execute("SELECT count(*) FROM lectura_procesada").fetchone()[0] == 20
+    assert conn.execute("SELECT count(*) FROM lectura_procesada").fetchone()[0] == existentes + len(lecturas)
 
 
 def test_las_claves_siguen_garantizando_unicidad_y_fk(conn):

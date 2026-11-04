@@ -7,8 +7,8 @@ Flujo "Lectura IoT" (§9):
    inserta `lectura_procesada` (PK lectura_id + version_reglas = idempotencia) y aplica alertas/estado/incidente
    → marca la lectura en Mongo. Si el proceso se cae entre el commit y la marca, el reintento encuentra
    `lectura_procesada` y solo marca: nunca duplica efectos.
-3. `evaluar_comunicacion`: la falta de comunicación se CALCULA (último contacto + umbral). La fase 8 la
-   programará; hoy la llaman la UI al refrescar y `scripts/simulador_iot.py`.
+3. La ventana de Administración/Operaciones ejecuta `procesar_ciclo` en un trabajador, con cancelación
+   cooperativa. Los procesos técnicos también pueden evaluar sin una sesión de negocio.
 
 Operaciones de usuario: sesión → permiso → alcance → regla → transacción → auditoría.
 SUPUESTOS M1..M7: ver AGENTS.md §16 ("Supuestos de la fase 4").
@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from threading import Event
 from typing import Any, Callable
 
 from logistica.core.errors import (
@@ -46,7 +47,7 @@ from logistica.domain.monitoreo_dtos import (
 from logistica.repositories.connections import Connections
 from logistica.repositories.mongo.lecturas import LecturasRepository
 from logistica.repositories.postgres import unit_of_work
-from logistica.repositories.postgres.envios import AlcanceConsulta, EnvioRepository, TramoRepository
+from logistica.repositories.postgres.envios import EnvioRepository, TramoRepository
 from logistica.repositories.postgres.monitoreo import (
     AlertaRepository,
     CondicionRepository,
@@ -170,12 +171,33 @@ class MonitoreoService:
         return self._lecturas.insertar(doc)
 
     # ======================================================================= evaluación
+    def procesar_ciclo(self, sesion_id: uuid.UUID, detener: Event) -> tuple[ResultadoEvaluacion, int]:
+        """Proceso de la ventana: solo Administración/Operaciones con sesión vigente, lote acotado."""
+        with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR) as (_tx, p):
+            if not p.es_interno:
+                raise PermissionDeniedError("procesamiento de monitoreo reservado a perfiles internos")
+        resultado = self.evaluar_pendientes(limite=20, detener=detener)
+        if detener.is_set():
+            return resultado, 0
+        with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR):
+            pass
+        return resultado, self.evaluar_comunicacion(detener=detener)
+
+    def preparar_demo(self, sesion_id: uuid.UUID, escenario: str = "completo") -> uuid.UUID:
+        """Crea y reproduce un viaje SIMULADOR independiente; nunca reutiliza recursos operativos."""
+        from logistica.services.demo_monitoreo_service import preparar_demo
+
+        return preparar_demo(self._conn, self._aut, sesion_id, escenario)
+
     def evaluar_pendientes(self, *, limite: int = 200,
-                           sensor_ids: list[uuid.UUID] | None = None) -> ResultadoEvaluacion:
+                           sensor_ids: list[uuid.UUID] | None = None,
+                           detener: Event | None = None) -> ResultadoEvaluacion:
         """Evalúa hasta `limite` lecturas pendientes (las más viejas primero). Para tras el primer fallo de
         PostgreSQL: no tiene sentido seguir si la base no responde."""
         cuenta = dict.fromkeys(("evaluadas", "historicas", "revision", "repetidas", "reintentos"), 0)
         for _ in range(limite):
+            if detener is not None and detener.is_set():
+                break
             ahora = self._ahora_simple()
             doc = self._lecturas.reservar(propietario_id=self.propietario_id, ahora=ahora,
                                           reserva_s=self._reserva_s, sensor_ids=sensor_ids)
@@ -255,7 +277,8 @@ class MonitoreoService:
                                        {"tipo_incidente": a.tipo, "severidad": a.severidad, "automatico": True})
                 log.info("Incidente automático %s (%s) en el envío %s", incidente_id, a.tipo, contexto.envio_id)
 
-    def evaluar_comunicacion(self, *, sensor_ids: list[uuid.UUID] | None = None) -> int:
+    def evaluar_comunicacion(self, *, sensor_ids: list[uuid.UUID] | None = None,
+                             detener: Event | None = None) -> int:
         """Abre/escala alertas SIN_COMUNICACION de los sensores que deberían estar enviando y no lo hacen.
 
         Devuelve cuántas alertas abrió o escaló. El cierre lo hace la llegada de una lectura nueva y reciente.
@@ -264,7 +287,14 @@ class MonitoreoService:
         with unit_of_work(self._conn) as tx:
             ahora = self._ahora(tx)
             for esperado in self._estados.esperados(tx, sensor_ids):
+                if detener is not None and detener.is_set():
+                    break
                 self._estados.bloquear(tx, esperado.sensor_id)
+                # La consulta inicial pudo esperar a otro evaluador: releer DESPUÉS del lock.
+                actuales = self._estados.esperados(tx, [esperado.sensor_id])
+                if not actuales:
+                    continue
+                esperado = actuales[0]
                 condicion = (self._condiciones.obtener(tx, esperado.contexto.envio_id)
                              or dm.condicion_vacia(VERSION_REGLAS))
                 activas = self._alertas.activas(tx, esperado.sensor_id, esperado.contexto.envio_id)
@@ -300,21 +330,33 @@ class MonitoreoService:
                  despues: tuple[datetime, uuid.UUID] | None = None) -> PaginaLecturas:
         """Histórico paginado. Un usuario externo solo consulta por envío (de su alcance)."""
         exigir_con_zona(desde, hasta)
+        self._validar_filtro(campo, desde, hasta)
         if not 1 <= limite <= 1000:
             raise ValidationError("límite", user_message="Tamaño de página inválido.")
         with self._aut.operacion(sesion_id, Permiso.MONITOREO_CONSULTAR) as (tx, p):
             tramos = self._alcance_lecturas(tx, p, campo, valor)
         docs = self._lecturas.historial(campo=campo, valor=valor, desde=desde, hasta=hasta, limite=limite + 1,
                                         despues=despues, tramo_ids=tramos)
+        self._confirmar_consulta(sesion_id, campo, valor, tramos)
         pagina = [_lectura_dto(d) for d in docs[:limite]]
         siguiente = (pagina[-1].fecha_medicion, pagina[-1].id) if len(docs) > limite else None
         return PaginaLecturas(pagina, siguiente)
 
+    def ultimas_lecturas(self, sesion_id: uuid.UUID, envio_id: uuid.UUID) -> list[LecturaDTO]:
+        """Últimas 20 mediciones del alcance, sin recorrer todo el histórico."""
+        with self._aut.operacion(sesion_id, Permiso.MONITOREO_CONSULTAR) as (tx, p):
+            tramos = self._alcance_lecturas(tx, p, "envio_id", envio_id)
+        docs = self._lecturas.ultimas(envio_id=envio_id, tramo_ids=tramos)
+        self._confirmar_consulta(sesion_id, "envio_id", envio_id, tramos)
+        return [_lectura_dto(d) for d in docs]
+
     def posiciones(self, sesion_id: uuid.UUID, envio_id: uuid.UUID) -> list[PosicionDTO]:
         with self._aut.operacion(sesion_id, Permiso.MONITOREO_CONSULTAR) as (tx, p):
             tramos = self._alcance_lecturas(tx, p, "envio_id", envio_id)
-        return [PosicionDTO(d["fecha_medicion"], d["posicion"]["coordinates"][1], d["posicion"]["coordinates"][0],
-                            d["sensor_id"]) for d in self._lecturas.posiciones(envio_id=envio_id, tramo_ids=tramos)]
+        docs = self._lecturas.posiciones(envio_id=envio_id, tramo_ids=tramos)
+        self._confirmar_consulta(sesion_id, "envio_id", envio_id, tramos)
+        return [PosicionDTO(_utc(d["fecha_medicion"]), d["posicion"]["coordinates"][1],
+                            d["posicion"]["coordinates"][0], d["sensor_id"]) for d in docs]
 
     # ======================================================================= acciones de usuario
     def reconocer_alerta(self, sesion_id: uuid.UUID, alerta_id: uuid.UUID) -> AlertaDTO:
@@ -398,6 +440,21 @@ class MonitoreoService:
             return incidente
 
     # ======================================================================= auxiliares
+    def _confirmar_consulta(self, sesion_id: uuid.UUID, campo: str, valor: uuid.UUID,
+                            tramos: list[uuid.UUID] | None) -> None:
+        """Descarta respuestas de Mongo si se revocó la sesión, el permiso o cambió el alcance."""
+        with self._aut.operacion(sesion_id, Permiso.MONITOREO_CONSULTAR) as (tx, p):
+            actual = self._alcance_lecturas(tx, p, campo, valor)
+            if actual != tramos:
+                raise PermissionDeniedError("el alcance cambió durante la consulta; vuelva a consultar")
+
+    @staticmethod
+    def _validar_filtro(campo: str, desde: datetime | None, hasta: datetime | None) -> None:
+        if campo not in ("envio_id", "sensor_id", "contenedor_id"):
+            raise ValidationError("campo de histórico inválido", user_message="Filtro de lecturas inválido.")
+        if desde is not None and hasta is not None and desde >= hasta:
+            raise ValidationError("rango vacío", user_message="Desde debe ser anterior a hasta (exclusivo).")
+
     def _evento_incidente(self, tx: Any, incidente_id: uuid.UUID, tipo: str, fecha: datetime,
                           usuario_id: uuid.UUID | None, detalles: dict[str, Any]) -> None:
         """SUPUESTO M1: los incidentes (abierto/resuelto) van al historial de eventos en Mongo vía outbox.

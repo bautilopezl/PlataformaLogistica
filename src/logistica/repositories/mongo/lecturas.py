@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from pymongo import ASCENDING, ReturnDocument
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 
 from logistica.repositories.mongo import MongoRepository
 
@@ -146,14 +146,52 @@ class LecturasRepository(MongoRepository):
 
     def posiciones(self, *, envio_id: uuid.UUID, limite: int = 2000,
                    tramo_ids: list[uuid.UUID] | None = None) -> list[dict[str, Any]]:
-        """Posiciones GPS del envío en orden temporal (para el mapa)."""
+        """Hasta las últimas 2000 posiciones GPS, devueltas en orden temporal."""
         filtro: dict[str, Any] = {"envio_id": envio_id, "posicion": {"$exists": True}}
         if tramo_ids is not None:
             filtro["tramo_id"] = {"$in": list(tramo_ids)}
         with self._collection() as c:
-            return list(c.find(filtro,
-                               {"posicion": 1, "fecha_medicion": 1, "sensor_id": 1})
-                        .sort([("fecha_medicion", ASCENDING), ("_id", ASCENDING)]).limit(limite))
+            docs = list(c.find(filtro, {"posicion": 1, "fecha_medicion": 1, "sensor_id": 1})
+                        .sort([("fecha_medicion", DESCENDING), ("_id", DESCENDING)]).limit(limite))
+        return list(reversed(docs))
+
+    def posiciones_asignacion(
+        self,
+        *,
+        envio_id: uuid.UUID,
+        contenedor_id: uuid.UUID,
+        desde: datetime,
+        hasta: datetime | None,
+        tramo_ids: list[uuid.UUID] | None,
+        limite: int,
+    ) -> list[dict[str, Any]]:
+        """Lee posiciones medidas solo durante el uso de una asignación concreta."""
+        if tramo_ids is not None and not tramo_ids:
+            return []
+        filtro: dict[str, Any] = {
+            "envio_id": envio_id,
+            "contenedor_id": contenedor_id,
+            "fecha_medicion": {"$gte": desde},
+            "posicion": {"$exists": True},
+        }
+        if hasta is not None:
+            filtro["fecha_medicion"]["$lt"] = hasta
+        if tramo_ids is not None:
+            filtro["tramo_id"] = {"$in": tramo_ids}
+        with self._collection() as c:
+            docs = list(
+                c.find(filtro, {"posicion": 1, "fecha_medicion": 1, "sensor_id": 1})
+                .sort([("fecha_medicion", DESCENDING), ("_id", DESCENDING)])
+                .limit(limite)
+            )
+        return list(reversed(docs))
+
+    def ultimas(self, *, envio_id: uuid.UUID,
+                tramo_ids: list[uuid.UUID] | None = None) -> list[dict[str, Any]]:
+        """Últimas 20 lecturas del envío, filtradas por los tramos visibles."""
+        filtro = self._filtro_historial("envio_id", envio_id, None, None, None, tramo_ids)
+        with self._collection() as c:
+            return list(c.find(filtro).sort([("fecha_medicion", DESCENDING), ("_id", DESCENDING)]).limit(20))
 
     def para_revision(self, *, limite: int = 200) -> list[dict[str, Any]]:
         with self._collection() as c:

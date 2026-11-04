@@ -455,9 +455,12 @@ def validar_condicion(datos: Any) -> dict[str, Any]:
         if valor is None or str(valor).strip() == "":
             return None
         try:
-            return Decimal(str(valor).strip().replace(",", "."))
+            numero = Decimal(str(valor).strip().replace(",", "."))
         except ArithmeticError:
             raise ValidationError(nombre, user_message=f"El umbral {nombre} debe ser un número.") from None
+        if not numero.is_finite():
+            raise ValidationError(nombre, user_message=f"El umbral {nombre} debe ser un número finito.")
+        return numero
 
     v = {n: dec(n) for n in ("temperatura_min_c", "temperatura_max_c", "humedad_min_pct", "humedad_max_pct",
                              "vibracion_max_g", "bateria_min_pct")}

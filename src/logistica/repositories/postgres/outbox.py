@@ -76,6 +76,49 @@ class OutboxRepository:
             for r in rows
         ]
 
+    def estados_mongo(self, tx: Session, evento_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """Lee únicamente el estado de sincronización de eventos ya consultados en Mongo."""
+        if not evento_ids:
+            return {}
+        rows = tx.execute(
+            text(
+                "SELECT x.evento_id, x.estado FROM outbox_entrega x"
+                " WHERE x.destino = :destino AND x.evento_id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"destino": MONGO, "ids": evento_ids},
+        )
+        return {r.evento_id: r.estado for r in rows}
+
+    def resumen_mongo_envio(
+        self, tx: Session, envio_id: uuid.UUID, *, tramo_ids: list[uuid.UUID] | None = None
+    ) -> dict[str, int]:
+        """Resume la entrega de Mongo sin usar la outbox como fuente del historial."""
+        filas = tx.execute(
+            text(
+                """
+                SELECT x.estado, count(*)
+                FROM outbox_evento e
+                JOIN outbox_entrega x ON x.evento_id = e.id
+                WHERE x.destino = :destino
+                  AND (e.agregado_id = :envio OR e.payload ->> 'envio_id' = CAST(:envio AS text))
+                  AND (
+                    CAST(:tramos AS text[]) IS NULL
+                    OR e.payload ->> 'tramo_id' IS NULL
+                    OR e.payload ->> 'tramo_id' = ANY(CAST(:tramos AS text[]))
+                  )
+                GROUP BY x.estado
+                """
+            ),
+            {
+                "destino": MONGO,
+                "envio": envio_id,
+                "tramos": [str(tramo_id) for tramo_id in tramo_ids] if tramo_ids is not None else None,
+            },
+        )
+        resultado = dict.fromkeys(ESTADOS_ENTREGA, 0)
+        resultado.update({estado: cantidad for estado, cantidad in filas})
+        return resultado
+
     # ------------------------------------------------------------------ consumo (fase 3)
     def reclamar(
         self,

@@ -14,11 +14,13 @@ from logistica.repositories.connections import Connections
 from logistica.services.acceso_service import AccesoService
 from logistica.services.auditoria_service import AuditoriaService
 from logistica.services.catalogo_service import CatalogoService
+from logistica.services.comunicacion_service import ComunicacionService
 from logistica.services.envio_service import EnvioService
 from logistica.services.monitoreo_service import MonitoreoService
 from logistica.services.sincronizacion_service import SincronizacionService
 from logistica.services.autorizacion import Autorizador
 from logistica.services.health_service import HealthService
+from logistica.services.trazabilidad_service import TrazabilidadService
 from logistica.services.tercero_service import TerceroService
 from logistica.services.usuario_service import UsuarioService
 
@@ -34,6 +36,8 @@ class Servicios:
     envios: EnvioService
     sincronizacion: SincronizacionService
     monitoreo: MonitoreoService
+    trazabilidad: TrazabilidadService
+    comunicacion: ComunicacionService
 
 
 def crear_servicios(config: AppConfig, connections: Connections, instancia_id: uuid.UUID) -> Servicios:
@@ -50,4 +54,6 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
         sincronizacion=SincronizacionService(connections),
         envios=EnvioService(connections, autorizador),
         monitoreo=MonitoreoService(connections, autorizador),
+        trazabilidad=TrazabilidadService(connections, autorizador),
+        comunicacion=ComunicacionService(connections, autorizador),
     )

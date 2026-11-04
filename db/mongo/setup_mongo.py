@@ -179,6 +179,11 @@ INDICES = {
     "eventos_logisticos": [
         ([("envio_id", ASCENDING), ("fecha_ocurrencia", ASCENDING)], "ix_evento_envio_fecha", {}),
         ([("contenedor_ids", ASCENDING), ("fecha_ocurrencia", ASCENDING)], "ix_evento_contenedor_fecha", {}),
+        (
+            [("envio_id", ASCENDING), ("fecha_ocurrencia", ASCENDING), ("_id", ASCENDING)],
+            "ix_evento_envio_fecha_id",
+            {},
+        ),
     ],
     "mensajes": [
         (

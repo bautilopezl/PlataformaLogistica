@@ -8,9 +8,13 @@ es el `event_id` de la outbox: una reentrega no duplica (inserción idempotente 
 from __future__ import annotations
 
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Any
 
+from pymongo import ASCENDING
+
+from logistica.domain.trazabilidad_dtos import EventoCursor
 from logistica.repositories.mongo import MongoRepository
 
 _UUIDS = ("envio_id", "tramo_id", "ubicacion_id", "usuario_id")
@@ -60,3 +64,57 @@ class EventosRepository(MongoRepository):
     def de_envio(self, envio_id: uuid.UUID) -> list[dict[str, Any]]:
         with self._collection() as coleccion:
             return list(coleccion.find({"envio_id": envio_id}).sort([("fecha_ocurrencia", 1), ("_id", 1)]))
+
+    def historial_envio(
+        self,
+        envio_id: uuid.UUID,
+        *,
+        tipo: str | None,
+        desde: datetime | None,
+        hasta: datetime | None,
+        texto: str | None,
+        tramo_id: uuid.UUID | None,
+        tramo_ids: list[uuid.UUID] | None,
+        despues: EventoCursor | None,
+        limite: int,
+    ) -> list[dict[str, Any]]:
+        """Consulta solo el histórico Mongo, con cursor estable por ocurrencia e identificador."""
+        filtro: dict[str, Any] = {"envio_id": envio_id}
+        condiciones: list[dict[str, Any]] = []
+        if tipo:
+            filtro["tipo"] = tipo
+        if tramo_id is not None:
+            filtro["tramo_id"] = tramo_id
+        elif tramo_ids is not None:
+            if not tramo_ids:
+                return []
+            condiciones.append(
+                {"$or": [{"tramo_id": {"$in": tramo_ids}}, {"tramo_id": {"$exists": False}}]}
+            )
+        if desde is not None or hasta is not None:
+            ocurrencia: dict[str, datetime] = {}
+            if desde is not None:
+                ocurrencia["$gte"] = desde
+            if hasta is not None:
+                ocurrencia["$lt"] = hasta
+            filtro["fecha_ocurrencia"] = ocurrencia
+        if texto:
+            condiciones.append({"descripcion": {"$regex": re.escape(texto), "$options": "i"}})
+        if despues is not None:
+            fecha, ultimo_id = despues
+            condiciones.append(
+                {
+                    "$or": [
+                        {"fecha_ocurrencia": {"$gt": fecha}},
+                        {"fecha_ocurrencia": fecha, "_id": {"$gt": ultimo_id}},
+                    ]
+                }
+            )
+        if condiciones:
+            filtro["$and"] = condiciones
+        with self._collection() as coleccion:
+            return list(
+                coleccion.find(filtro)
+                .sort([("fecha_ocurrencia", ASCENDING), ("_id", ASCENDING)])
+                .limit(limite)
+            )
