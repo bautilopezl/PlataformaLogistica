@@ -98,6 +98,11 @@ class FakeSincronizacion:
         return {"NEO4J_LOGISTICA": {"PENDIENTE": 2, "FALLIDA": 1}, "MONGO_EVENTOS": {"PENDIENTE": 0}}
 
 
+class FakeProcesos:
+    def ejecutar_con_sesion(self, sesion_id):
+        return []
+
+
 class FakeEnvios:
     def listar(self, sesion_id, **filtros):
         return []
@@ -118,7 +123,7 @@ class FakeMonitoreo:
     def procesar_ciclo(self, sesion_id, detener):
         from logistica.services.monitoreo_service import ResultadoEvaluacion
 
-        return ResultadoEvaluacion(), 0
+        return ResultadoEvaluacion()
 
 
 class FakeAuditoria:
@@ -173,6 +178,7 @@ def servicios(acceso=None, terceros=None, auditoria=None) -> Servicios:
         comercial=object(),
         reportes=object(),
         predicciones=object(),
+        procesos=FakeProcesos(),
     )
 
 
@@ -514,6 +520,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         ComercialService(tx_connections, aut),
         ReporteService(tx_connections, aut, ROOT / "reportes"),
         PrediccionService(tx_connections, aut),
+        FakeProcesos(),  # el planificador real correría tareas sobre la conexión única de la prueba
     )
     sufijo = uuid.uuid4().hex[:8]
     with unit_of_work(tx_connections) as tx:

@@ -416,3 +416,15 @@ def test_condiciones_solo_antes_de_salir_y_validadas(m):
     otro = m.nuevo_envio()
     with pytest.raises(ValidationError):
         m.mon.definir_condiciones(s, otro.id, CondicionDatos(temperatura_min_c="9", temperatura_max_c="1"))
+
+
+def test_un_sensor_con_lecturas_sin_evaluar_no_se_da_por_mudo(m):
+    """Revisión de la fase 8: la falta de comunicación se revisa aparte de la evaluación de lecturas. Si el
+    sensor tiene lecturas recibidas que todavía nadie evaluó, NO está mudo: no se abre una alerta falsa."""
+    m.leer(0)
+    m.leer(170, evaluar=False)  # llegó, pero todavía no se evaluó
+    m.reloj.t = SALIDA + timedelta(seconds=200)  # 200 s desde la última EVALUADA
+    assert m.mon.evaluar_comunicacion(sensor_ids=m.sensores) == 0
+    assert m.alertas("SIN_COMUNICACION") == []
+    m.mon.evaluar_pendientes(sensor_ids=m.sensores)
+    assert m.mon.evaluar_comunicacion(sensor_ids=m.sensores) == 0  # ya evaluada: contacto a los 170 s

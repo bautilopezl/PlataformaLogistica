@@ -29,7 +29,9 @@ from logistica.domain.comercial_dtos import (
     PagoDTO,
 )
 from logistica.domain.logistica import EstadoEnvio
+from logistica.domain.procesos import meses_a_cerrar
 from logistica.repositories.connections import Connections
+from logistica.repositories.postgres import unit_of_work
 from logistica.repositories.postgres.comercial import (
     AlcanceComercial,
     AplicacionRepository,
@@ -524,6 +526,49 @@ class ComercialService:
                 saldo_final=str(resumen.saldo_final),
             )
             return self._cuentas.cierre(tx, cuenta_id, periodo)
+
+    def cerrar_pendientes(self) -> int:
+        """Cierre mensual AUTOMÁTICO (proceso técnico de la fase 8, sin sesión). Cierra, en orden, los meses
+        terminados que cada cuenta todavía no cerró. Idempotente: UNIQUE(cuenta, período) y el chequeo previo
+        de `cerrar` hacen que repetirlo, o correrlo en dos instancias, no cree un segundo cierre.
+
+        Cada cuenta va en su propia transacción: un problema en una no impide cerrar las demás. Si alguna
+        falló, al final se lanza un error (después de cerrar las otras) para que el planificador lo informe y
+        reintente. Devuelve cuántos cierres creó.
+        """
+        with unit_of_work(self._conn) as tx:
+            cuentas = self._cuentas.ids(tx)
+        creados = 0
+        fallidas: list[uuid.UUID] = []
+        for cuenta_id in cuentas:
+            try:
+                creados += self._cerrar_cuenta_pendiente(cuenta_id)
+            except Exception:  # noqa: BLE001 — se registra y se sigue con las demás cuentas
+                log.exception("Cierre automático de la cuenta %s falló", cuenta_id)
+                fallidas.append(cuenta_id)
+        if creados:
+            log.info("Cierre mensual automático: %d cierre(s)", creados)
+        if fallidas:
+            raise BusinessRuleError(f"cierre automático: {len(fallidas)} cuenta(s) con error: {fallidas}",
+                                    user_message=f"No se cerraron {len(fallidas)} cuenta(s); ver logs.")
+        return creados
+
+    def _cerrar_cuenta_pendiente(self, cuenta_id: uuid.UUID) -> int:
+        """Cierra los meses pendientes de UNA cuenta, en su propia transacción. Devuelve cuántos cerró."""
+        creados = 0
+        with unit_of_work(self._conn) as tx:
+            self._cuentas.bloquear(tx, cuenta_id)  # mismo lock que los movimientos y el cierre manual
+            ahora = ahora_pg(tx)
+            for periodo in meses_a_cerrar(self._cuentas.primer_movimiento(tx, cuenta_id),
+                                          self._cuentas.ultimo_cierre(tx, cuenta_id), ahora):
+                resumen = self._cuentas.resumen_periodo(tx, cuenta_id, dc.inicio_periodo(periodo),
+                                                        dc.fin_periodo(periodo))
+                if self._cuentas.crear_cierre(tx, cuenta_id, periodo, resumen):
+                    creados += 1
+                    auditoria.registrar(tx, "cierre_automatico", None, entidad="cuenta_corriente",
+                                        entidad_id=cuenta_id, periodo=periodo.isoformat(),
+                                        saldo_final=str(resumen.saldo_final))
+        return creados
 
     # ======================================================================= consultas (con alcance)
     def cuentas(self, sesion_id: uuid.UUID, *, tercero_id: uuid.UUID | None = None) -> list[CuentaDTO]:

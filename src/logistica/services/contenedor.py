@@ -19,6 +19,7 @@ from logistica.services.comunicacion_service import ComunicacionService
 from logistica.services.envio_service import EnvioService
 from logistica.services.monitoreo_service import MonitoreoService
 from logistica.services.prediccion_service import PrediccionService
+from logistica.services.proceso_service import Planificador
 from logistica.services.reporte_service import ReporteService
 from logistica.services.sincronizacion_service import SincronizacionService
 from logistica.services.autorizacion import Autorizador
@@ -44,6 +45,7 @@ class Servicios:
     comercial: ComercialService
     reportes: ReporteService
     predicciones: PrediccionService
+    procesos: Planificador
 
 
 def crear_servicios(config: AppConfig, connections: Connections, instancia_id: uuid.UUID) -> Servicios:
@@ -51,6 +53,9 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
     hasher = Hasher(s.argon2_time_cost, s.argon2_memory_kib, s.argon2_parallelism)
     autorizador = Autorizador(connections)
     comercial = ComercialService(connections, autorizador)
+    sincronizacion = SincronizacionService(connections, facturacion=comercial.facturar_entrega)
+    monitoreo = MonitoreoService(connections, autorizador)
+    predicciones = PrediccionService(connections, autorizador)
     return Servicios(
         salud=HealthService(connections, timeout_s=config.db_timeout_s),
         acceso=AccesoService(connections, hasher, s, instancia_id, autorizador),
@@ -58,12 +63,14 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
         terceros=TerceroService(connections, autorizador),
         auditoria=AuditoriaService(connections, autorizador),
         catalogo=CatalogoService(connections, autorizador),
-        sincronizacion=SincronizacionService(connections, facturacion=comercial.facturar_entrega),
+        sincronizacion=sincronizacion,
         envios=EnvioService(connections, autorizador),
-        monitoreo=MonitoreoService(connections, autorizador),
+        monitoreo=monitoreo,
         trazabilidad=TrazabilidadService(connections, autorizador),
         comunicacion=ComunicacionService(connections, autorizador),
         comercial=comercial,
         reportes=ReporteService(connections, autorizador, config.reportes_dir),
-        predicciones=PrediccionService(connections, autorizador),
+        predicciones=predicciones,
+        procesos=Planificador(connections, autorizador, sincronizacion=sincronizacion, monitoreo=monitoreo,
+                              comercial=comercial, predicciones=predicciones),
     )

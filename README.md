@@ -78,7 +78,7 @@ LOGISTICA_TEST_CONNECTIONS=1 LOGISTICA_TEST_PG="host=localhost port=5432 dbname=
 | Fase 5 (trazabilidad y chat) | El grupo informó línea de tiempo del envío entregado, ruta ACTUALIZADA 8/8, asignación del contenedor/tramo y GPS vacío esperado. **Repitió Trazabilidad → Red:** aparece **Exportadora Demo SA**, el gráfico es legible y funciona **Ctrl+rueda**. No acredita trazabilidad completa ni permisos externos. Chat privado/grupal/público interno implementado, con pruebas automáticas de servicios, dos ventanas y dos procesos Qt con sesiones independientes; **chat manual del grupo pendiente** |
 
 Pendiente: prueba manual del grupo del chat y fases **6 a 9**, que no se implementaron en este corte.
-Estado al 4/11/2026: **558 pruebas en verde** con los tres motores (suite completa, salida 0), incluidas las 60 de la fase 6 y las 49 de la fase 7.
+Estado al 4/11/2026: **582 pruebas en verde** con los tres motores (suite completa, salida 0), incluidas las 60 de la fase 6 y las 49 de la fase 7 y las 23 de la fase 8.
 
 **Decisión del grupo para la fase 6 (4/11/2026):** la facturación automática se genera **al confirmar la
 entrega de cada envío**: una factura por envío entregado, con sus cargos facturables. Siguen abiertas la
@@ -87,8 +87,8 @@ numeración de comprobantes, las anulaciones y la moneda por defecto (`AGENTS.md
 ## Comercial: facturación, pagos y cuentas (fase 6)
 
 **Circuito.** Comercial carga los **cargos** de un envío (lo que se le cobra al cliente; no es el costo del tramo).
-Operaciones confirma la entrega y, segundos después, la instancia interna abierta (o `scripts/sincronizar.py
---continuo`) emite **una factura de venta por moneda** con los cargos pendientes. La factura, sus renglones, el
+Operaciones confirma la entrega y, al minuto como máximo, el planificador de procesos (cualquier instancia interna
+abierta, o `scripts/procesos.py --continuo`) emite **una factura de venta por moneda** con los cargos pendientes. La factura, sus renglones, el
 estado de los cargos y el movimiento de la cuenta por cobrar quedan en **una sola transacción**, junto con la
 marca de la entrega `FACTURACION` de la outbox: una reentrega nunca factura dos veces. Si la facturación falla, la
 entrega del envío **igual queda confirmada** y la factura se reintenta.
@@ -144,6 +144,30 @@ habilitados y con sus datos; el operador, la predicción. Supuestos R1–R6 en `
 `tests/test_fase7_reportes.py` (PostgreSQL real: resultados, permisos, alcance, registro, archivo faltante, error
 al escribir y sesión revocada durante la generación) y `tests/test_fase7_ui.py` (Qt offscreen). **No se probó a mano
 en la ventana.**
+
+## Procesos periódicos (fase 8)
+
+Cuatro tareas: **facturación** de las entregas confirmadas, **sensores sin comunicación**, **cierre mensual** de
+cuentas y **predicción diaria** de atrasos. Las ejecuta cada instancia abierta por un usuario interno (al iniciar y
+cada 60 s; el resultado se ve en la barra inferior: "Procesos: …", con el detalle al pasar el mouse) o, sin ventana:
+
+```powershell
+$env:PYTHONPATH="src"
+.\.venv\Scripts\python.exe scripts\procesos.py              # una vuelta: revisa todo lo pendiente
+.\.venv\Scripts\python.exe scripts\procesos.py --continuo   # en bucle cada 60 s (Ctrl+C corta)
+```
+
+Varias instancias a la vez **no duplican nada**: cada tarea toma un advisory lock de PostgreSQL por tarea y
+período (por ejemplo `proceso:CIERRE_MENSUAL:2026-10`) en una conexión dedicada que se libera siempre; la que no lo
+consigue omite esa vuelta. Además cada efecto tiene su clave única (un cargo en una sola factura, un cierre por
+cuenta y mes, una predicción por envío y día). Al arrancar, la primera vuelta factura lo que quedó pendiente y
+cierra los meses terminados que falten; la predicción es solo la del día. Si solo hay clientes u operadores
+conectados, nadie procesa (supuesto P1). Supuestos P1–P4 en `AGENTS.md` §16.
+
+**Pruebas:** `tests/test_fase8_concurrencia.py` corre **dos planificadores reales a la vez** sobre una base
+temporal (una instancia ejecuta y la otra omite; un solo cierre, una factura y una predicción) y la recuperación de
+lo pendiente al iniciar; `tests/test_fase8_procesos.py` prueba el lock (incluido que una conexión que no pudo
+soltarlo no vuelva al pool) y el planificador. **No se probó a mano en la ventana.**
 
 ## Probar monitoreo desde la ventana (fase 4)
 

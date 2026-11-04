@@ -127,6 +127,6 @@ def test_procesamiento_cancelado_no_reserva_lecturas(m):
     entrada, _, _ = m.leer(0, evaluar=False)
     detener = Event()
     detener.set()
-    resultado, cambios = m.mon.procesar_ciclo(m.ops.sesion_id, detener)
-    assert resultado.evaluadas == 0 and cambios == 0
+    resultado = m.mon.procesar_ciclo(m.ops.sesion_id, detener)
+    assert resultado.evaluadas == 0
     assert m.evaluacion(entrada.id)["estado"] == "PENDIENTE"

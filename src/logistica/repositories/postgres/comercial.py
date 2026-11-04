@@ -476,6 +476,13 @@ class CuentaRepository:
             {"t": tercero_id, "n": naturaleza, "m": moneda},
         ).scalar_one()
 
+    def ids(self, tx: Session) -> list[uuid.UUID]:
+        return list(tx.execute(text("SELECT id FROM cuenta_corriente ORDER BY creado_en, id")).scalars())
+
+    def primer_movimiento(self, tx: Session, cuenta_id: uuid.UUID) -> datetime | None:
+        return tx.execute(text("SELECT min(fecha) FROM movimiento_cuenta WHERE cuenta_id = :c"),
+                          {"c": cuenta_id}).scalar_one()
+
     def bloquear(self, tx: Session, cuenta_id: uuid.UUID) -> bool:
         return (
             tx.execute(

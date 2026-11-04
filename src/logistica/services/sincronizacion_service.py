@@ -63,9 +63,9 @@ class SincronizacionService:
         reserva_s: float = RESERVA_S,
         facturacion: Callable[[Any, uuid.UUID, uuid.UUID | None, uuid.UUID], Any] | None = None,
     ):
-        """`facturacion(tx, envio_id, usuario_id, evento_id)`: facturación automática (fase 6). Sin ella, las
-        entregas FACTURACION quedan pendientes (no se pierden) hasta que una instancia la tenga
-        configurada."""
+        """`facturacion(tx, envio_id, usuario_id, evento_id)`: facturación automática (fase 6). Las entregas
+        FACTURACION las consume el planificador de procesos (fase 8) con `procesar(FACTURACION)`; sin
+        `facturacion` configurada quedan pendientes (no se pierden)."""
         self._pg = connections
         self._facturacion = facturacion
         self._outbox = OutboxRepository()
@@ -81,10 +81,12 @@ class SincronizacionService:
 
     # ------------------------------------------------------------------ consumo
     def procesar_todo(self, *, limite: int = LOTE) -> dict[str, ResultadoLote]:
-        """Una vuelta por cada destino. Un error en uno no impide procesar el otro."""
+        """Una vuelta por cada destino de PROYECCIÓN (Mongo y Neo4j). Un error en uno no impide el otro.
+
+        La facturación (destino FACTURACION) no está acá: es un proceso de negocio y la corre el planificador
+        de la fase 8, bajo su advisory lock."""
         resultados = {}
-        destinos = (MONGO, NEO4J, FACTURACION) if self._facturacion is not None else (MONGO, NEO4J)
-        for destino in destinos:
+        for destino in (MONGO, NEO4J):
             try:
                 resultados[destino] = self.procesar(destino, limite=limite)
             except Exception:  # por ejemplo, PostgreSQL caído: se reintenta en la próxima vuelta

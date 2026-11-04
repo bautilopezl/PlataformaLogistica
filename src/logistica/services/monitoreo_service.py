@@ -8,8 +8,9 @@ Flujo "Lectura IoT" (§9):
    inserta `lectura_procesada` (PK lectura_id + version_reglas = idempotencia) y aplica
    alertas/estado/incidente → marca la lectura en Mongo. Si el proceso se cae entre el commit y la marca, el
    reintento encuentra `lectura_procesada` y solo marca: nunca duplica efectos.
-3. La ventana de Administración/Operaciones ejecuta `procesar_ciclo` en un trabajador, con cancelación
-   cooperativa. Los procesos técnicos también pueden evaluar sin una sesión de negocio.
+3. La ventana de Administración/Operaciones ejecuta `procesar_ciclo` (evaluar lecturas) en un trabajador, con
+   cancelación cooperativa. La detección de sensores sin comunicación (`evaluar_comunicacion`) es una tarea
+   del planificador de procesos periódicos (fase 8).
 
 Operaciones de usuario: sesión → permiso → alcance → regla → transacción → auditoría.
 SUPUESTOS M1..M7: ver AGENTS.md §16 ("Supuestos de la fase 4").
@@ -214,17 +215,14 @@ class MonitoreoService:
         return self._lecturas.insertar(doc)
 
     # ======================================================================= evaluación
-    def procesar_ciclo(self, sesion_id: uuid.UUID, detener: Event) -> tuple[ResultadoEvaluacion, int]:
-        """Proceso de la ventana: solo Administración/Operaciones con sesión vigente, lote acotado."""
+    def procesar_ciclo(self, sesion_id: uuid.UUID, detener: Event) -> ResultadoEvaluacion:
+        """Proceso de la ventana: evalúa un lote acotado de lecturas pendientes. Solo
+        Administración/Operaciones con sesión vigente. (Los sensores sin comunicación los revisa el
+        planificador de la fase 8.)"""
         with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR) as (_tx, p):
             if not p.es_interno:
                 raise PermissionDeniedError("procesamiento de monitoreo reservado a perfiles internos")
-        resultado = self.evaluar_pendientes(limite=20, detener=detener)
-        if detener.is_set():
-            return resultado, 0
-        with self._aut.operacion(sesion_id, Permiso.ENVIOS_PLANIFICAR):
-            pass
-        return resultado, self.evaluar_comunicacion(detener=detener)
+        return self.evaluar_pendientes(limite=20, detener=detener)
 
     def preparar_demo(self, sesion_id: uuid.UUID, escenario: str = "completo") -> uuid.UUID:
         """Crea y reproduce un viaje SIMULADOR independiente; nunca reutiliza recursos operativos."""
@@ -378,13 +376,21 @@ class MonitoreoService:
         """Abre/escala alertas SIN_COMUNICACION de los sensores que deberían estar enviando y no lo hacen.
 
         Devuelve cuántas alertas abrió o escaló. El cierre lo hace la llegada de una lectura nueva y reciente.
+
+        Un sensor con lecturas RECIBIDAS que todavía nadie evaluó no está mudo: se omite en esta vuelta (si
+        no, el "último contacto", que sale de la última lectura evaluada, daría una alerta falsa). Si Mongo no
+        responde, no se abren alertas a ciegas: falla y se reintenta.
         """
         cambios = 0
         with unit_of_work(self._conn) as tx:
             ahora = self._ahora(tx)
-            for esperado in self._estados.esperados(tx, sensor_ids):
+            esperados = self._estados.esperados(tx, sensor_ids)
+            con_pendientes = self._lecturas.sensores_con_pendientes([e.sensor_id for e in esperados])
+            for esperado in esperados:
                 if detener is not None and detener.is_set():
                     break
+                if esperado.sensor_id in con_pendientes:
+                    continue
                 self._estados.bloquear(tx, esperado.sensor_id)
                 # La consulta inicial pudo esperar a otro evaluador: releer DESPUÉS del lock.
                 actuales = self._estados.esperados(tx, [esperado.sensor_id])

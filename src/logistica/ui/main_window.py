@@ -48,7 +48,8 @@ from logistica.ui.worker import WorkerPool
 log = logging.getLogger(__name__)
 SHUTDOWN_WAIT_MS = 10_000
 SYNC_MS = 10_000  # SUPUESTO (AGENTS.md §16.6): frecuencia de sincronización, a medir
-MONITOREO_MS = 60_000  # frecuencia de revisión de comunicación de AGENTS.md §10.4
+MONITOREO_MS = 60_000  # evaluación de lecturas pendientes
+PROCESOS_MS = 60_000  # planificador de procesos periódicos (fase 8): la tarea más frecuente es cada minuto
 
 
 class MainWindow(QMainWindow):
@@ -163,6 +164,17 @@ class MainWindow(QMainWindow):
         if principal.es_interno and principal.tiene_permiso(Permiso.ENVIOS_PLANIFICAR):
             self._timer_monitoreo.start(MONITOREO_MS)
             QTimer.singleShot(0, self.procesar_monitoreo)
+        # Fase 8: procesos periódicos (facturación, sensores inactivos, cierre mensual, predicción diaria) en
+        # cada instancia INTERNA. Varias instancias no se pisan: advisory lock por tarea y período (SUPUESTO
+        # P1).
+        self._procesando = False
+        self.estado_procesos = QLabel("Procesos: esta instancia no procesa")
+        self.statusBar().addPermanentWidget(self.estado_procesos)
+        self._timer_procesos = QTimer(self)
+        self._timer_procesos.timeout.connect(self.procesar_periodicos)
+        if principal.es_interno:
+            self._timer_procesos.start(PROCESOS_MS)
+            QTimer.singleShot(0, self.procesar_periodicos)  # al iniciar se revisa lo pendiente
 
     def titulos_pestanias(self) -> list[str]:
         return [self.tabs.tabText(i) for i in range(self.tabs.count())]
@@ -277,6 +289,37 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Sincronización detenida: {mensaje}")
 
     @Slot()
+    def procesar_periodicos(self) -> None:
+        if self._procesando or self._terminada or not self._timer_procesos.isActive():
+            return
+        self._procesando = True
+        self._pool.submit(
+            self._servicios.procesos.ejecutar_con_sesion,
+            self._procesos_ok,
+            self._procesos_error,
+            self.principal.sesion_id,
+            on_session_expired=self.terminar,
+        )
+
+    @Slot(object)
+    def _procesos_ok(self, resultados: list) -> None:
+        self._procesando = False
+        if self._terminada:
+            return
+        errores = [r for r in resultados if r.estado == "ERROR"]
+        hechas = sum(r.estado == "EJECUTADA" for r in resultados)
+        texto = f"Procesos: {hechas} ejecutados"
+        self.estado_procesos.setText(texto + (f" · {len(errores)} con error (ver logs)" if errores else ""))
+        self.estado_procesos.setToolTip("\n".join(f"{r.tarea.value} ({r.periodo}): {r.estado} {r.detalle}"
+                                                   for r in resultados))
+
+    @Slot(str)
+    def _procesos_error(self, mensaje: str) -> None:
+        self._procesando = False
+        if not self._terminada:
+            self.estado_procesos.setText(f"Procesos pendientes (se reintentará): {mensaje}")
+
+    @Slot()
     def procesar_monitoreo(self) -> None:
         if (
             self._procesando_monitoreo
@@ -296,14 +339,14 @@ class MainWindow(QMainWindow):
         )
 
     @Slot(object)
-    def _monitoreo_ok(self, resultado: tuple) -> None:
+    def _monitoreo_ok(self, resultado: object) -> None:
         self._procesando_monitoreo = False
         if self._terminada:
             return
-        lecturas, cambios = resultado
+        lecturas = resultado
         self.estado_monitoreo.setText(
-            f"Monitoreo: {lecturas.evaluadas} evaluadas · {cambios} cambios de comunicación"
-            f" · {lecturas.revision} revisión · {lecturas.reintentos} reintentos"
+            f"Monitoreo: {lecturas.evaluadas} evaluadas · {lecturas.revision} revisión"
+            f" · {lecturas.reintentos} reintentos"
         )
         if self.monitoreo is not None and self.tabs.currentWidget() is self.monitoreo:
             self.monitoreo.refrescar_datos()
@@ -317,6 +360,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._timer_sync.stop()
         self._timer_monitoreo.stop()
+        self._timer_procesos.stop()
         self._detener_monitoreo.set()
         self.chat.cerrar()
         if self.chat.trabajadores_activos():

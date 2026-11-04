@@ -106,7 +106,7 @@ class Monitor:
 
     def procesar_ciclo(self, sesion_id, detener):
         self._hilo()
-        return ResultadoEvaluacion(evaluadas=1), 0
+        return ResultadoEvaluacion(evaluadas=1)
 
 
 def cargar(qapp, rol="ADMINISTRADOR"):
@@ -240,7 +240,7 @@ def test_procesamiento_en_segundo_plano_no_bloquea_y_cierra_ordenado(qapp):
         entro.set()
         detener.wait(5)
         salio.set()
-        return ResultadoEvaluacion(), 0
+        return ResultadoEvaluacion()
 
     mon.procesar_ciclo = lento
     ss = servicios()
