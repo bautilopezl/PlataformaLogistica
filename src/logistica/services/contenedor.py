@@ -18,6 +18,8 @@ from logistica.services.comercial_service import ComercialService
 from logistica.services.comunicacion_service import ComunicacionService
 from logistica.services.envio_service import EnvioService
 from logistica.services.monitoreo_service import MonitoreoService
+from logistica.services.prediccion_service import PrediccionService
+from logistica.services.reporte_service import ReporteService
 from logistica.services.sincronizacion_service import SincronizacionService
 from logistica.services.autorizacion import Autorizador
 from logistica.services.health_service import HealthService
@@ -40,6 +42,8 @@ class Servicios:
     trazabilidad: TrazabilidadService
     comunicacion: ComunicacionService
     comercial: ComercialService
+    reportes: ReporteService
+    predicciones: PrediccionService
 
 
 def crear_servicios(config: AppConfig, connections: Connections, instancia_id: uuid.UUID) -> Servicios:
@@ -60,4 +64,6 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
         trazabilidad=TrazabilidadService(connections, autorizador),
         comunicacion=ComunicacionService(connections, autorizador),
         comercial=comercial,
+        reportes=ReporteService(connections, autorizador, config.reportes_dir),
+        predicciones=PrediccionService(connections, autorizador),
     )

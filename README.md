@@ -78,7 +78,7 @@ LOGISTICA_TEST_CONNECTIONS=1 LOGISTICA_TEST_PG="host=localhost port=5432 dbname=
 | Fase 5 (trazabilidad y chat) | El grupo informó línea de tiempo del envío entregado, ruta ACTUALIZADA 8/8, asignación del contenedor/tramo y GPS vacío esperado. **Repitió Trazabilidad → Red:** aparece **Exportadora Demo SA**, el gráfico es legible y funciona **Ctrl+rueda**. No acredita trazabilidad completa ni permisos externos. Chat privado/grupal/público interno implementado, con pruebas automáticas de servicios, dos ventanas y dos procesos Qt con sesiones independientes; **chat manual del grupo pendiente** |
 
 Pendiente: prueba manual del grupo del chat y fases **6 a 9**, que no se implementaron en este corte.
-Estado al 4/11/2026: **509 pruebas en verde** con los tres motores (suite completa, salida 0), incluidas las 60 de la fase 6.
+Estado al 4/11/2026: **558 pruebas en verde** con los tres motores (suite completa, salida 0), incluidas las 60 de la fase 6 y las 49 de la fase 7.
 
 **Decisión del grupo para la fase 6 (4/11/2026):** la facturación automática se genera **al confirmar la
 entrega de cada envío**: una factura por envío entregado, con sus cargos facturables. Siguen abiertas la
@@ -116,6 +116,34 @@ repetido, numeración simultánea) y la elimina al terminar. Los movimientos y l
 esas carreras no usan la base de desarrollo. Supuestos C1–C7 en `AGENTS.md` §16.
 
 **Cambio de esquema de este corte:** `db/postgres/900_grants.sql` quita a la identidad de ejecución el DELETE sobre `factura`, `factura_detalle`, `pago`, `pago_aplicacion`, `cargo_envio` y `cuenta_corriente` (se anulan, nunca se borran). Es idempotente: aplicarlo con `python scripts/setup_databases.py --only postgres`.
+
+## Reportes, analítica y predicción (fase 7)
+
+En la pestaña **Reportes**: elegir el tipo, los filtros (rango de fechas, cliente y, según el reporte, la forma de
+agrupar), **Ver** muestra la tabla con un gráfico de barras y **Exportar PDF/CSV** genera el archivo, que queda
+registrado (tabla `reporte`, estados PENDIENTE → EN_PROCESO → COMPLETADO o ERROR) en la carpeta `REPORTES_DIR`
+(por defecto `reportes/`, fuera de git). **Abrir** vuelve a comprobar el permiso; **Generar de nuevo** rehace un
+reporte con sus mismos parámetros (por ejemplo, desde otro equipo).
+
+Hay 14 tipos: 5 operativos (envíos por país, estado y cliente; demorados; incidentes abiertos), los analíticos de la
+consigna (tiempos máximo y mínimo por cliente, promedio de incidentes, tiempos promedio, rankings de rutas e
+incidentes y de clientes por volumen, desempeño histórico, anomalías de temperatura, predicción) y uno comercial
+(costos por tipo de transporte). Cada métrica sigue `AGENTS.md` §10.6; sin casos válidos se muestra `SIN_DATOS`,
+que no es lo mismo que cero.
+
+**Predicción de atrasos** (`FRECUENCIA_HISTORICA` 1.0): de las entregas de la misma ruta de los últimos 180 días
+(mínimo 10; si no, todas las rutas, mínimo 20), qué fracción llegó después del compromiso. Con menos historia el
+resultado es `SIN_DATOS`. Es una frecuencia histórica, **no** un modelo de aprendizaje automático ni una
+probabilidad individual calibrada. El botón **Calcular predicciones de hoy** (usuarios internos) es idempotente:
+repetirlo el mismo día no duplica.
+
+**Quién ve qué:** Operaciones, los reportes operativos y analíticos; Comercial, el de costos; un cliente, solo los
+habilitados y con sus datos; el operador, la predicción. Supuestos R1–R6 en `AGENTS.md` §16.
+
+**Pruebas:** `tests/test_fase7_dominio.py` (cada reporte con datos chicos y el resultado calculado a mano),
+`tests/test_fase7_reportes.py` (PostgreSQL real: resultados, permisos, alcance, registro, archivo faltante, error
+al escribir y sesión revocada durante la generación) y `tests/test_fase7_ui.py` (Qt offscreen). **No se probó a mano
+en la ventana.**
 
 ## Probar monitoreo desde la ventana (fase 4)
 

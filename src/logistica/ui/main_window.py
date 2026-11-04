@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from logistica.core.errors import ValidationError
 from logistica.domain.acceso import PERMISOS_CONSULTA_TERCEROS, Permiso, Principal, validar_password
 from logistica.services.contenedor import Servicios
+from logistica.services.reporte_service import PERMISOS_REPORTES
 from logistica.ui.estado_view import EstadoView
 from logistica.ui.sesiones_view import SesionesView
 from logistica.ui.terceros_view import TercerosView
@@ -38,6 +39,7 @@ from logistica.ui.auditoria_view import AuditoriaView
 from logistica.ui.catalogos_view import CatalogosView
 from logistica.ui.chat_view import ChatView
 from logistica.ui.comercial_view import ComercialView
+from logistica.ui.reportes_view import ReportesView
 from logistica.ui.envios_view import EnviosView
 from logistica.ui.monitoreo_view import MonitoreoView
 from logistica.ui.trazabilidad_view import TrazabilidadView
@@ -109,7 +111,13 @@ class MainWindow(QMainWindow):
             self._agregar(self.monitoreo, "Monitoreo")
         if principal.tiene_permiso(Permiso.CUENTAS_CONSULTAR, Permiso.FACTURAS_EMITIR):
             self._agregar(
-                ComercialView(servicios.comercial, servicios.envios, servicios.terceros, principal), "Comercial"
+                ComercialView(servicios.comercial, servicios.envios, servicios.terceros, principal),
+                "Comercial",
+            )
+        if principal.tiene_permiso(*PERMISOS_REPORTES):
+            self._agregar(
+                ReportesView(servicios.reportes, servicios.predicciones, servicios.terceros, principal),
+                "Reportes",
             )
         if principal.tiene_permiso(*PERMISOS_CONSULTA_TERCEROS):
             self._agregar(
@@ -270,13 +278,21 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def procesar_monitoreo(self) -> None:
-        if (self._procesando_monitoreo or self._terminada or self._detener_monitoreo.is_set()
-                or not self._timer_monitoreo.isActive()):
+        if (
+            self._procesando_monitoreo
+            or self._terminada
+            or self._detener_monitoreo.is_set()
+            or not self._timer_monitoreo.isActive()
+        ):
             return
         self._procesando_monitoreo = True
         self._pool.submit(
-            self._servicios.monitoreo.procesar_ciclo, self._monitoreo_ok, self._monitoreo_error,
-            self.principal.sesion_id, self._detener_monitoreo, on_session_expired=self.terminar,
+            self._servicios.monitoreo.procesar_ciclo,
+            self._monitoreo_ok,
+            self._monitoreo_error,
+            self.principal.sesion_id,
+            self._detener_monitoreo,
+            on_session_expired=self.terminar,
         )
 
     @Slot(object)

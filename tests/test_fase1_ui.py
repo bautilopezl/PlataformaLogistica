@@ -171,6 +171,8 @@ def servicios(acceso=None, terceros=None, auditoria=None) -> Servicios:
         trazabilidad=FakeTrazabilidad(),
         comunicacion=FakeComunicacion(),
         comercial=object(),
+        reportes=object(),
+        predicciones=object(),
     )
 
 
@@ -237,6 +239,7 @@ def _permisos_sembrados(rol: str) -> frozenset[str]:
                 "Catálogos",
                 "Monitoreo",
                 "Comercial",
+                "Reportes",
                 "Terceros",
                 "Usuarios",
                 "Sesiones",
@@ -246,11 +249,32 @@ def _permisos_sembrados(rol: str) -> frozenset[str]:
         (
             "OPERACIONES",
             False,
-            ["Estado", "Envíos", "Trazabilidad", "Catálogos", "Monitoreo", "Terceros", "Sesiones"],
+            [
+                "Estado",
+                "Envíos",
+                "Trazabilidad",
+                "Catálogos",
+                "Monitoreo",
+                "Reportes",
+                "Terceros",
+                "Sesiones",
+            ],
         ),
-        ("COMERCIAL", False, ["Estado", "Envíos", "Trazabilidad", "Comercial", "Terceros", "Sesiones"]),
-        ("CLIENTE", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Comercial", "Sesiones"]),
-        ("OPERADOR_LOGISTICO", True, ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Comercial", "Sesiones"]),
+        (
+            "COMERCIAL",
+            False,
+            ["Estado", "Envíos", "Trazabilidad", "Comercial", "Reportes", "Terceros", "Sesiones"],
+        ),
+        (
+            "CLIENTE",
+            True,
+            ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Comercial", "Reportes", "Sesiones"],
+        ),
+        (
+            "OPERADOR_LOGISTICO",
+            True,
+            ["Estado", "Envíos", "Trazabilidad", "Monitoreo", "Comercial", "Reportes", "Sesiones"],
+        ),
     ],
 )
 def test_cada_perfil_ve_solo_sus_pestanias(qapp, rol, externo, esperadas):
@@ -458,6 +482,8 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
     from logistica.services.auditoria_service import AuditoriaService
     from logistica.services.catalogo_service import CatalogoService
     from logistica.services.comercial_service import ComercialService
+    from logistica.services.prediccion_service import PrediccionService
+    from logistica.services.reporte_service import ReporteService
     from logistica.services.comunicacion_service import ComunicacionService
     from logistica.services.envio_service import EnvioService
     from logistica.services.monitoreo_service import MonitoreoService
@@ -486,6 +512,8 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         TrazabilidadService(tx_connections, aut),
         ComunicacionService(tx_connections, aut),
         ComercialService(tx_connections, aut),
+        ReporteService(tx_connections, aut, ROOT / "reportes"),
+        PrediccionService(tx_connections, aut),
     )
     sufijo = uuid.uuid4().hex[:8]
     with unit_of_work(tx_connections) as tx:
@@ -511,6 +539,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         "Envíos",
         "Trazabilidad",
         "Comercial",
+        "Reportes",
         "Terceros",
         "Sesiones",
     ]  # COMERCIAL

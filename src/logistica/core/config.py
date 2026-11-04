@@ -78,6 +78,9 @@ class AppConfig:
     # 5 s hasta medirlo en el entorno de demostración.
     db_timeout_s: float = 5.0
     security: SecurityConfig = field(default_factory=lambda: SecurityConfig())
+    # Carpeta local de los archivos de reportes (fase 7). SUPUESTO R1 (AGENTS.md §16.7): cada equipo guarda
+    # los suyos; en otro equipo un reporte se vuelve a generar desde sus parámetros registrados.
+    reportes_dir: Path = PROJECT_ROOT / "reportes"
 
 
 @dataclass(frozen=True)
@@ -139,4 +142,8 @@ def load_config(env_file: str | os.PathLike | None = None) -> AppConfig:
     )
     if not security.session_hours > 0:  # también rechaza NaN
         raise RuntimeError("SESSION_HOURS debe ser mayor que cero")
-    return AppConfig(admin, app, mongo, neo, _env("LOG_LEVEL", "INFO").upper(), log_dir, timeout, security)
+    reportes_dir = Path(_env("REPORTES_DIR", "reportes"))
+    if not reportes_dir.is_absolute():
+        reportes_dir = PROJECT_ROOT / reportes_dir
+    return AppConfig(admin, app, mongo, neo, _env("LOG_LEVEL", "INFO").upper(), log_dir, timeout, security,
+                     reportes_dir)
