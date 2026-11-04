@@ -27,7 +27,8 @@ from logistica.domain.comunicacion import (
 from logistica.domain.comunicacion import texto_validado
 from logistica.core.errors import ValidationError
 from logistica.services.comunicacion_service import ComunicacionService
-from logistica.ui.widgets import (
+from logistica.ui.widgets import (  # indice_dato: re-exportado
+    indice_dato,
     Campo, FormularioDialog, clave_seleccionada, fecha_local, llenar_tabla, tabla,
 )
 from logistica.ui.worker import WorkerPool
@@ -35,9 +36,6 @@ from logistica.ui.worker import WorkerPool
 POLLING_MS = 3000  # Valor inicial para medir en la demostración; no es el scheduler general.
 
 
-def indice_dato(combo: QComboBox, dato: object) -> int:
-    # QVariant compara UUID Python por identidad, no por valor (relecturas crean objetos nuevos).
-    return next((i for i in range(combo.count()) if combo.itemData(i) == dato), -1)
 
 
 class ChatView(QWidget):

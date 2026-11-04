@@ -162,6 +162,12 @@ def clave_seleccionada(t: QTableWidget) -> Any | None:
     return t.item(fila, 0).data(Qt.ItemDataRole.UserRole)
 
 
+def indice_dato(combo: QComboBox, dato: object) -> int:
+    """Índice del elemento cuyo dato es `dato`, o -1. QVariant compara los UUID de Python por identidad, no por
+    valor (cada relectura crea objetos nuevos), por eso no se usa `findData`."""
+    return next((i for i in range(combo.count()) if combo.itemData(i) == dato), -1)
+
+
 def si_no(valor: bool) -> str:
     return "Sí" if valor else "No"
 
