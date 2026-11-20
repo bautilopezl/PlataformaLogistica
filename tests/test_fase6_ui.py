@@ -62,29 +62,46 @@ def fila(tabla, columna, texto):
     raise AssertionError(f"{texto!r} no está en la tabla")
 
 
+def _indice_opcional(tabla, columna, texto):
+    """Como `fila`, pero devuelve `None` en vez de lanzar: para usar dentro de `esperar(...)`, cuyo
+    predicado se evalúa en bucle mientras la tabla todavía puede estar vacía."""
+    for i in range(tabla.rowCount()):
+        if tabla.item(i, columna).text() == texto:
+            return i
+    return None
+
+
 def test_la_factura_automatica_se_ve_y_se_anula_con_refacturacion(qapp, c, monkeypatch):
     p = c.entregado()
     vista = abrir(qapp, c, "COMERCIAL")
-    assert vista.tabla_facturas.rowCount() == 1, vista.estado.text()
+    # La vista de Comercial muestra TODAS las facturas del sistema (AGENTS.md §11: "Comercial ve todo"), no
+    # solo las de este envío; se ubica la fila propia por la razón social única de este caso de prueba, en
+    # vez de asumir que es la única factura que existe.
+    i = fila(vista.tabla_facturas, 1, c.cliente_sa.razon_social)
     assert (
-        vista.tabla_facturas.item(0, 6).text() == "12,000.00"
-        and vista.tabla_facturas.item(0, 9).text() == "EMITIDA"
+        vista.tabla_facturas.item(i, 6).text() == "12,000.00"
+        and vista.tabla_facturas.item(i, 9).text() == "EMITIDA"
     )
-    vista.tabla_facturas.selectRow(0)
+    vista.tabla_facturas.selectRow(i)
     assert vista.b_anular.isEnabled()
     monkeypatch.setattr(
         comercial_view, "pedir", lambda *a, **k: {"motivo": "Precio mal cargado", "refacturar": True}
     )
     vista.anular_factura()
     assert esperar(qapp, lambda: not vista.ocupado()), vista.estado.text()
-    assert vista.tabla_facturas.item(0, 9).text() == "ANULADA"
+    i = fila(vista.tabla_facturas, 1, c.cliente_sa.razon_social)  # recargar puede reordenar las filas
+    assert vista.tabla_facturas.item(i, 9).text() == "ANULADA"
     vista.seleccionar_envio(p.id)
     assert esperar(qapp, lambda: not vista.ocupado())
     estados = sorted(vista.tabla_cargos.item(i, 5).text() for i in range(vista.tabla_cargos.rowCount()))
     assert estados == ["CANCELADO", "PENDIENTE"]  # original atado a la anulada + reemplazo
     vista.facturar_pendientes()
     assert esperar(qapp, lambda: not vista.ocupado()), vista.estado.text()
-    assert vista.tabla_facturas.rowCount() == 2
+    propias = sum(
+        1 for i in range(vista.tabla_facturas.rowCount())
+        if vista.tabla_facturas.item(i, 1).text() == c.cliente_sa.razon_social
+    )
+    assert propias == 2  # la anulada + la refacturada
     vista.cerrar()
 
 
@@ -102,19 +119,25 @@ def test_registrar_y_aplicar_un_cobro_desde_la_pantalla(qapp, c, monkeypatch):
     }
     monkeypatch.setattr(comercial_view, "pedir", lambda *a, **k: datos)
     vista.registrar_pago()
-    assert esperar(qapp, lambda: not vista.ocupado() and vista.tabla_pagos.rowCount() == 1), (
-        vista.estado.text()
-    )
+    assert esperar(
+        qapp,
+        lambda: not vista.ocupado()
+        and _indice_opcional(vista.tabla_pagos, 1, c.cliente_sa.razon_social) is not None,
+    ), vista.estado.text()
     assert vista._clave_pago is None  # se registró: la próxima carga usa otra clave
-    vista.tabla_pagos.selectRow(0)
-    [factura_id] = list(vista._facturas)
+    vista.tabla_pagos.selectRow(fila(vista.tabla_pagos, 1, c.cliente_sa.razon_social))
+    [factura_id] = [fid for fid, f in vista._facturas.items() if f.tercero_id == c.cliente_sa.id]
     monkeypatch.setattr(comercial_view, "pedir", lambda *a, **k: {"factura": factura_id, "monto": "5000"})
     vista.aplicar_pago()
     assert esperar(qapp, lambda: not vista.ocupado()), vista.estado.text()
-    assert vista.tabla_facturas.item(0, 8).text() == "7,000.00"  # pendiente
-    vista.tabla_cuentas.selectRow(fila(vista.tabla_cuentas, 2, "USD"))
+    i = fila(vista.tabla_facturas, 1, c.cliente_sa.razon_social)
+    assert vista.tabla_facturas.item(i, 8).text() == "7,000.00"  # pendiente
+    # Columna 0 (razón social), no solo columna 2 (moneda): con la siembra de demostración puede haber
+    # varias cuentas en USD y hay que ubicar la de ESTE cliente, no la primera que aparezca.
+    fila_cuenta = fila(vista.tabla_cuentas, 0, c.cliente_sa.razon_social)
+    vista.tabla_cuentas.selectRow(fila_cuenta)
     assert esperar(qapp, lambda: not vista.ocupado() and vista.tabla_movimientos.rowCount() == 2)
-    assert vista.tabla_cuentas.item(fila(vista.tabla_cuentas, 2, "USD"), 3).text() == "7,000.00"
+    assert vista.tabla_cuentas.item(fila_cuenta, 3).text() == "7,000.00"
     vista.cerrar()
 
 
@@ -136,7 +159,11 @@ def test_un_pago_que_falla_conserva_su_clave_para_reintentar_sin_duplicar(qapp, 
     assert clave is not None and vista.estado.property("estado") == "error"
     datos["tercero"] = c.cliente_sa.id  # corrige y reintenta: misma clave
     vista.registrar_pago()
-    assert esperar(qapp, lambda: not vista.ocupado() and vista.tabla_pagos.rowCount() == 1)
+    assert esperar(
+        qapp,
+        lambda: not vista.ocupado()
+        and _indice_opcional(vista.tabla_pagos, 1, c.cliente_sa.razon_social) is not None,
+    )
     assert vista._clave_pago is None
     vista.cerrar()
 

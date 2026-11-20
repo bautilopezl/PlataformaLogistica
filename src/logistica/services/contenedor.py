@@ -20,6 +20,7 @@ from logistica.services.envio_service import EnvioService
 from logistica.services.monitoreo_service import MonitoreoService
 from logistica.services.prediccion_service import PrediccionService
 from logistica.services.proceso_service import Planificador
+from logistica.services.reconciliacion_service import ReconciliacionService
 from logistica.services.reporte_service import ReporteService
 from logistica.services.sincronizacion_service import SincronizacionService
 from logistica.services.autorizacion import Autorizador
@@ -45,6 +46,7 @@ class Servicios:
     comercial: ComercialService
     reportes: ReporteService
     predicciones: PrediccionService
+    reconciliacion: ReconciliacionService
     procesos: Planificador
 
 
@@ -56,6 +58,7 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
     sincronizacion = SincronizacionService(connections, facturacion=comercial.facturar_entrega)
     monitoreo = MonitoreoService(connections, autorizador)
     predicciones = PrediccionService(connections, autorizador)
+    reconciliacion = ReconciliacionService(connections)
     return Servicios(
         salud=HealthService(connections, timeout_s=config.db_timeout_s),
         acceso=AccesoService(connections, hasher, s, instancia_id, autorizador),
@@ -71,6 +74,8 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
         comercial=comercial,
         reportes=ReporteService(connections, autorizador, config.reportes_dir),
         predicciones=predicciones,
+        reconciliacion=reconciliacion,
         procesos=Planificador(connections, autorizador, sincronizacion=sincronizacion, monitoreo=monitoreo,
-                              comercial=comercial, predicciones=predicciones),
+                              comercial=comercial, predicciones=predicciones,
+                              reconciliacion=reconciliacion),
     )

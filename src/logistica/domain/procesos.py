@@ -23,6 +23,7 @@ class Tarea(StrEnum):
     SENSORES_INACTIVOS = "SENSORES_INACTIVOS"  # alertas de falta de comunicación
     CIERRE_MENSUAL = "CIERRE_MENSUAL"  # cierre de cuentas de los meses terminados
     PREDICCION_DIARIA = "PREDICCION_DIARIA"  # predicción de atrasos del día
+    RECONCILIACION = "RECONCILIACION"  # AGENTS.md §13/§14: diagnóstico entre motores y comercial
 
 
 FRECUENCIA = {
@@ -30,6 +31,7 @@ FRECUENCIA = {
     Tarea.SENSORES_INACTIVOS: Frecuencia.CADA_MINUTO,
     Tarea.CIERRE_MENSUAL: Frecuencia.MENSUAL,
     Tarea.PREDICCION_DIARIA: Frecuencia.DIARIA,
+    Tarea.RECONCILIACION: Frecuencia.DIARIA,
 }
 
 

@@ -1,10 +1,12 @@
 """Planificador de procesos periódicos (AGENTS.md §12, fase 8).
 
-Cuatro tareas, cada una una estrategia (función) sobre servicios que YA son idempotentes:
+Cinco tareas, cada una una estrategia (función) sobre servicios que YA son idempotentes:
 - FACTURACION: consume las entregas `FACTURACION` de la outbox (facturas de las entregas confirmadas, §16.3).
 - SENSORES_INACTIVOS: abre/escala alertas de falta de comunicación (§10.4, cada 60 s).
 - CIERRE_MENSUAL: cierra los meses terminados de cada cuenta.
 - PREDICCION_DIARIA: predicción de atrasos del día.
+- RECONCILIACION: diagnóstico diario entre PostgreSQL/MongoDB/Neo4j y de integridad comercial (§13/§14);
+  solo reporta (log), nunca repara ni reconstruye nada.
 
 Coordinación entre instancias, en dos capas:
 1. Advisory lock por TAREA y PERÍODO (`proceso:<tarea>:<período>`), en una conexión dedicada, liberado en
@@ -52,6 +54,7 @@ class Planificador:
         monitoreo,
         comercial,
         predicciones,
+        reconciliacion=None,
         reloj: Callable[[], datetime] | None = None,
     ):
         self._conn = connections
@@ -63,6 +66,8 @@ class Planificador:
             Tarea.CIERRE_MENSUAL: lambda: f"{comercial.cerrar_pendientes()} cierre(s)",
             Tarea.PREDICCION_DIARIA: lambda: _texto_prediccion(predicciones.calcular()),
         }
+        if reconciliacion is not None:
+            self._tareas[Tarea.RECONCILIACION] = lambda: _texto_reconciliacion(reconciliacion.ejecutar())
         # Período ya completado POR ESTA INSTANCIA (las diarias y mensuales no se repiten en cada vuelta). Es
         # solo un ahorro: la garantía de "un solo efecto" la dan el lock y las claves de negocio.
         self._hechas: dict[Tarea, str] = {}
@@ -128,3 +133,11 @@ def _texto_lote(r) -> str:
 
 def _texto_prediccion(r) -> str:
     return f"{r.calculadas} predicción(es) nuevas · {r.existentes} ya calculadas hoy"
+
+
+def _texto_reconciliacion(r) -> str:
+    motores_caidos = [m for m, ok in r.motores_disponibles.items() if not ok]
+    detalle = f"{len(r.discrepancias)} discrepancia(s) · {len(r.entregas_fallidas)} entrega(s) fallida(s)"
+    if motores_caidos:
+        detalle += f" · motores no disponibles: {', '.join(motores_caidos)}"
+    return detalle

@@ -31,10 +31,12 @@ db/postgres/   000 extensiones · 010 acceso · 020 logística · 030 monitoreo 
                050 comunicación/procesos · 090 seed roles y permisos · 900 grants  (38 tablas)
 db/mongo/      setup_mongo.py  → validadores $jsonSchema e índices (3 colecciones)
 db/neo4j/      constraints.cypher → unicidad e índices
-scripts/       setup_databases.py
+scripts/       setup_databases.py · seed_demo.py (demostración) · reconciliar.py (diagnóstico) ·
+               empaquetar.py (ejecutable, fase 9)
 src/logistica/ core (config, logging sin secretos, errores) · domain
                repositories (base.py: traducción de errores · postgres/ · mongo/ · neo4j/ · connections.py)
-               services (health_service.py) · ui (worker.py · theme.py · main_window.py) · main.py
+               services (health_service.py, reconciliacion_service.py) · ui (worker.py · theme.py ·
+               main_window.py) · main.py
 tests/         test_postgres_integrity.py (37) · test_particionamiento_postgres.py (3)
                test_static_artifacts.py (6) · test_fase0_cimientos.py (43)
                test_fase1_dominio.py (28) · test_fase1_acceso.py (52) · test_fase1_ui.py (23)
@@ -43,6 +45,11 @@ tests/         test_postgres_integrity.py (37) · test_particionamiento_postgres
                test_fase3_dominio.py (3) · test_fase3_sincronizacion.py (18)
                test_fase5_trazabilidad.py (11, requiere los tres motores)
                test_fase5_comunicacion.py (27) · test_fase5_chat_ui.py (12)
+               test_fase9_seed_demo.py (15, requiere los tres motores; idempotencia, recuperación y
+               sincronización de scripts/seed_demo.py)
+               test_fase9_reconciliacion.py (10, requiere los tres motores; detección de discrepancias
+               Neo4j/Mongo/comerciales de services/reconciliacion_service.py)
+docs/          informe-final.md · entrega-reproducible.md · guion-defensa.md (informe final y entrega, fase 9)
 ```
 
 Capas: `ui → services → repositories → (PostgreSQL | MongoDB | Neo4j)`. La UI nunca ejecuta SQL ni
@@ -76,9 +83,33 @@ LOGISTICA_TEST_CONNECTIONS=1 LOGISTICA_TEST_PG="host=localhost port=5432 dbname=
 | Fase 3 (sincronización) | Outbox con reclamo atómico (dos trabajadores no procesan la misma entrega), histórico de eventos en MongoDB (idempotente por `_id`) y proyección de cada envío en Neo4j recalculada desde PostgreSQL con guarda de versión. Con Neo4j caído se sigue operando y al volver el grafo converge sin duplicados (probado; la caída se simula con un puerto sin servidor). `scripts/sincronizar.py` procesa, reencola fallidas o reconstruye el grafo |
 | Fase 4 (monitoreo) | Servicio compuesto, pantalla Qt con condiciones, sensores, últimas mediciones, historial filtrable/paginado, alertas, incidentes y GPS nativo. El grupo informó pruebas manuales de demos de temperatura, recuperación y desconexión; historial de lecturas y mapa GPS; gestión y resolución de un incidente. Al recuperar, la alerta de temperatura se cierra automáticamente y el incidente queda abierto; `SIN_COMUNICACION` también se cierra al recuperar contacto |
 | Fase 5 (trazabilidad y chat) | El grupo informó línea de tiempo del envío entregado, ruta ACTUALIZADA 8/8, asignación del contenedor/tramo y GPS vacío esperado. **Repitió Trazabilidad → Red:** aparece **Exportadora Demo SA**, el gráfico es legible y funciona **Ctrl+rueda**. No acredita trazabilidad completa ni permisos externos. Chat privado/grupal/público interno implementado, con pruebas automáticas de servicios, dos ventanas y dos procesos Qt con sesiones independientes; **chat manual del grupo pendiente** |
+| Fase 9 (siembra, reconciliación, ejecutable) | Seed corrido contra la base real con código 0 (conteos confirmados por consulta directa). Reconciliación de solo lectura (Neo4j/Mongo/comercial) con 10 pruebas contra los tres motores reales, integrada como tarea diaria del planificador. Ejecutable compilado con PyInstaller y verificado: abre la ventana de login con `.env` presente, falla con código 2 y sin ventana si falta. **Nada de esto se probó a mano en la ventana todavía** |
 
-Pendiente: prueba manual del grupo del chat y fases **6 a 9**, que no se implementaron en este corte.
-Estado al 4/11/2026: **582 pruebas en verde** con los tres motores (suite completa, salida 0), incluidas las 60 de la fase 6 y las 49 de la fase 7 y las 23 de la fase 8.
+Pendiente: prueba manual del grupo del chat; prueba manual de las fases 6 a 9 (facturación, reportes/predicción,
+procesos periódicos, siembra de demostración, reconciliación y ejecutable — todas con pruebas automáticas pero
+**no probadas a mano en la ventana**); convertir `docs/informe-final.md`/`docs/entrega-reproducible.md`/
+`docs/guion-defensa.md` al formato final que pida la cátedra si Markdown no alcanza; y confirmar contra qué
+instancia de entrega corresponde el 4/11/2026.
+Estado al cierre de la fase 9 (4/11/2026): **604 casos en total** (conteo estable: dos corridas completas
+colectaron exactamente 604 cada una). **Ninguna de las dos corridas completas dio 604/604**: una, con un
+build de PyInstaller compilando en paralelo, dio 602 aprobadas/2 falladas/1 error de teardown; otra, sin ese
+build pero con la máquina compartida por otras aplicaciones de alto uso de CPU (confirmado con
+`Get-Process`), dio 597 aprobadas/7 falladas. Entre ambas aparecieron 8 identidades de prueba distintas con
+problemas, siempre las mismas, y siempre una aserción sobre tiempo real de respuesta (chequeo de los tres
+motores con límite de 6 s, subprocesos de Python/Qt con límite de 30-35 s) — nunca una prueba de lógica de
+negocio. Reejecutadas aisladas, el subconjunto de 22 casos de la primera corrida pasó 22/22, pero de los 7
+casos de la segunda corrida solo 3 pasaron aislados (4 siguieron fallando con la misma carga de CPU todavía
+presente): la carga del equipo compartido es la hipótesis más probable, no una conclusión confirmada con un
+experimento controlado. El detalle completo (qué prueba, qué corrida, qué reejecución) está en
+[`docs/informe-final.md` §7](./docs/informe-final.md). No se tocó ningún timeout del código para "arreglar"
+esto. Antes de la corrida de la tarde se reaplicó
+`db/postgres/900_grants.sql` (`setup_databases.py --only postgres`, idempotente, sin `--reset`): revoca
+DELETE sobre las tablas comerciales para la identidad de ejecución, un cambio de privilegios
+(no de esquema ni de datos) que venía en el pull y que la base local todavía no tenía aplicado; sin eso, 6
+pruebas de `test_fase6_comercial.py` fallaban. Se verificó antes y después que `ENV-20261103-GHP2TD` sigue
+ENTREGADO con sus mismas fechas y que los conteos de `tercero`/`usuario`/`envio`/`sesion` no cambiaron (salvo
+por la siembra de demostración, corrida después y confirmada por separado).
+
 
 **Decisión del grupo para la fase 6 (4/11/2026):** la facturación automática se genera **al confirmar la
 entrega de cada envío**: una factura por envío entregado, con sus cargos facturables. Siguen abiertas la
@@ -168,6 +199,137 @@ conectados, nadie procesa (supuesto P1). Supuestos P1–P4 en `AGENTS.md` §16.
 temporal (una instancia ejecuta y la otra omite; un solo cierre, una factura y una predicción) y la recuperación de
 lo pendiente al iniciar; `tests/test_fase8_procesos.py` prueba el lock (incluido que una conexión que no pudo
 soltarlo no vuelva al pool) y el planificador. **No se probó a mano en la ventana.**
+
+## Datos de demostración (fase 9, en curso)
+
+`scripts/seed_demo.py` (agente, 4/11/2026) siembra datos reproducibles pasando por los **servicios** (sesión
+→ permiso → alcance → regla → transacción → auditoría), igual que la aplicación: 5 terceros (2 clientes, 2
+operadores, 1 proveedor), 4 ubicaciones reales, 5 usuarios (uno por perfil: OPERACIONES, COMERCIAL, dos
+CLIENTE de la misma empresa y un OPERADOR_LOGISTICO), vehículos y contenedores, **12 envíos ENTREGADOS en la
+misma ruta** Buenos Aires–Rotterdam repartidos en los últimos ~170 días (3 con atraso, para que la
+predicción de atrasos tenga la muestra mínima de la §10.5 y un resultado no trivial), un envío PLANIFICADO
+en esa misma ruta (el "objetivo" de la predicción), un BORRADOR y un CANCELADO en otra ruta terrestre, un
+incidente manual resuelto, facturación automática + 2 cobros (uno total, uno parcial) + una factura de
+compra con su pago, la demo de monitoreo IoT ya probada de la fase 4 (`MonitoreoService.preparar_demo`) y 4
+conversaciones de chat (privada interna, grupal, canal público y privada entre dos clientes).
+
+```powershell
+$env:PYTHONPATH="src"
+.\.venv\Scripts\python.exe scripts\seed_demo.py --email admin@empresa.com   # pide la clave sin eco
+```
+
+**Revisión del 4/11/2026 (tarde-noche):** una segunda pasada, pedida explícitamente antes de correrlo contra
+la base real, encontró y corrigió varios problemas reales que la primera validación (un harness manual, no
+repetible) no cubría:
+
+- **Idempotencia real, no solo por prefijo.** Un prefijo (`DEMO-SEED`) identifica que un dato es de
+  demostración, pero no alcanza para saber si ya existe: terceros/usuarios/vehículos/contenedores se
+  reconocen por su identificación, email o código antes de crear. Para la ruta histórica (12 envíos sin un
+  id elegible y con código aleatorio), cada ocurrencia se identifica por el número embebido en
+  `descripcion_carga` (`"ocurrencia N/12"`). Cada conversación de chat también se reconoce por separado (no
+  había un único "ya existe" para todo el chat).
+- **Recuperación tras una ejecución parcial.** Si el script se interrumpe a mitad de la ruta histórica, el
+  envío que quedó a mitad puede estar en BORRADOR/PLANIFICADO (se cancela y se reemplaza; S8 lo permite en
+  esos estados) o en EN_TRANSITO (S8 ya no permite cancelarlo: en vez de abandonarlo, se **termina en el
+  mismo lugar donde quedó**, usando su propia `salida_real_en` ya registrada, nunca una fecha recalculada).
+  Antes de esta revisión, el chequeo de "¿ya sembré la ruta?" solo contaba ENTREGADOS: una interrupción
+  parcial hacía que la siguiente corrida sembrara los 12 de nuevo (duplicando lo ya entregado).
+- **Dos bugs de normalización que rompían la idempotencia silenciosamente:** `VehiculoDatos`/
+  `ContenedorDatos`/`UsuarioDatos` normalizan (mayúsculas, sin espacios, minúsculas) antes de guardar;
+  `asegurar_vehiculo`/`asegurar_contenedor`/`asegurar_usuario` comparaban contra el valor SIN normalizar, así
+  que una segunda llamada con una variante de mayúsculas/minúsculas no encontraba el existente e intentaba
+  crear un duplicado (fallaba con "vehículo duplicado"). Encontrado por
+  `tests/test_fase9_seed_demo.py::test_asegurar_ubicacion_vehiculo_contenedor_son_idempotentes`.
+- **La sincronización ahora se acota por envío (`agregado_id`), nunca por lote general.** Antes procesaba
+  hasta 50 entregas pendientes de la cola SIN filtrar por envío: en una base con otros envíos reales con
+  entregas pendientes (la de desarrollo HOY no tiene ninguna pendiente, pero podría tenerlas en el futuro),
+  el script les habría tocado la cola. Ahora cada destino se procesa un envío a la vez, solo para los
+  envíos que esta siembra creó.
+- **La predicción de atrasos YA NO se calcula desde este script.** `PrediccionService.calcular()` es, por
+  diseño, un proceso de alcance TODO EL SISTEMA (evalúa cualquier envío PLANIFICADO/EN_TRANSITO existente,
+  no solo los de la siembra; es el mismo método que corre la fase 8 una vez al día). La base de desarrollo
+  tiene HOY 3 envíos EN_TRANSITO reales del equipo (`ENV-20261103-GF5A8U`, `JWCP8R`, `R6Z65H`): dispararlo
+  desde la siembra les habría agregado una predicción que nadie pidió (aditiva e idempotente, nunca
+  modifica el envío, pero fuera del alcance de "solo crear datos de demostración"). Se calculará sola con
+  una instancia interna abierta (cada 60 s) o con `scripts/procesos.py`.
+
+**Por qué las corridas del harness anterior habían devuelto código de salida 1 pese a texto de éxito:** se
+investigó en lugar de asumir. En reproducciones aisladas, ni `2>&1` con texto acentuado ni múltiples
+`log.warning` a stderr alcanzaron para reproducir un `$LASTEXITCODE` distinto de 0; probablemente fue un
+artefacto de estado acumulado en una sesión de PowerShell muy larga (con `NativeCommandError` de PowerShell
+7.3+ al mezclar stderr con `2>&1`), no un fallo real del script. A partir de esta revisión, toda corrida de
+validación comprueba `$LASTEXITCODE` explícitamente después de cada invocación, sin depender del texto
+impreso ni del código que reporta la terminal.
+
+**Pruebas permanentes:** el harness manual temporal se reemplazó por `tests/test_fase9_seed_demo.py` (15
+pruebas), que corre contra PostgreSQL real dentro de una transacción que se revierte (`tx_connections`,
+igual que el resto de la suite de integración) y contra Mongo/Neo4j reales con limpieza por `envio_id` al
+terminar (mismo patrón que `tests/test_fase3_sincronizacion.py`) — nunca contra la base de desarrollo.
+Cubre: primera corrida y repetición sin duplicados; recuperación de un huérfano BORRADOR (se cancela y
+reemplaza) y de un huérfano EN_TRANSITO (se completa en el lugar donde quedó); conservación de un tercero
+ajeno y de las entregas de outbox pendientes de otro envío (confirma que `agregado_id` aísla de verdad);
+coherencia temporal dentro de un envío (creación ≤ salida ≤ llegada ≤ entrega, reserva cubre el uso real,
+con y sin atraso); que Mongo y Neo4j reciben, por el flujo normal de sincronización, las fechas HISTÓRICAS
+correctas (no las de hoy); que `_retrasar_creacion` solo afecta el envío indicado y nunca otro; e
+idempotencia del chat. Se ejecutaron con `LOGISTICA_TEST_CONNECTIONS=1` y los tres motores: **15 aprobadas,
+0 fallidas, código de salida 0** (verificado con `$LASTEXITCODE`, no deducido del texto). Se verificó antes
+y después que no quedó nada en Mongo/Neo4j ni en PostgreSQL de desarrollo (mismos conteos y
+`ENV-20261103-GHP2TD` sin cambios).
+
+**Corrida real contra la base de desarrollo (4/11/2026):** el equipo ejecutó `scripts/seed_demo.py` contra
+la base real con código de salida 0. Se confirmó por consulta directa (sin modificar nada): `tercero`=11,
+`usuario`=6, `envio`=20, `factura`=13, `pago`=3, `conversacion`=4, `cargo_envio`=12, `incidente`=4, y
+`ENV-20261103-GHP2TD` sigue `ENTREGADO` con sus mismas fechas.
+
+## Reconciliación de diagnóstico (fase 9, cierre)
+
+`services/reconciliacion_service.py` + `repositories/postgres/reconciliacion.py` + `domain/reconciliacion.py`
+comparan, **sin reparar nada**, los hechos de PostgreSQL contra Neo4j (el subgrafo de cada envío reciente) y
+Mongo (sus eventos), y revisan sobreaplicaciones de pagos/facturas. Un motor caído se informa como "no
+disponible" para esa corrida (nunca se asume consistencia ni se interpreta como éxito). Se integró como una
+tarea más del planificador de la fase 8 (`Tarea.RECONCILIACION`, diaria, mismo advisory lock que las demás) y
+también puede correrse sola:
+
+```powershell
+$env:PYTHONPATH="src"
+.\.venv\Scripts\python.exe scripts\reconciliar.py
+```
+
+**Pruebas:** `tests/test_fase9_reconciliacion.py` (10, PostgreSQL en transacción revertida + Mongo/Neo4j
+reales con limpieza por envío): detecta un envío sin proyección en Neo4j, un envío marcado `COMPLETADA` en
+Mongo sin que el documento exista, un pago sobreaplicado (forzado con una inserción SQL directa, ya que los
+servicios normales lo impiden con bloqueos), que un motor caído no rompe la corrida, y que un envío
+sincronizado de punta a punta no genera ninguna discrepancia propia (aunque la base tenga otros datos). Al
+escribirlas se encontraron y corrigieron 2 problemas reales no relacionados con la lógica de reconciliación:
+un import directo de `sqlalchemy` en el servicio (violaba la regla de arquitectura "servicios no importan
+drivers", detectada por `test_fase0_cimientos.py`) y 3 pruebas de `test_fase6_ui.py` que asumían que la
+pestaña Comercial (que un interno ve sin filtro de tercero) tenía una sola fila — dejó de ser cierto al
+crecer la base con la siembra; se reescribieron para ubicar su propia fila por un dato único, no por
+posición. **Todavía sin prueba manual del grupo.**
+
+## Ejecutable empaquetado (fase 9, cierre)
+
+```powershell
+python scripts\empaquetar.py             # --onedir (carpeta), o --onefile
+```
+
+Compila con PyInstaller (agregado a `requirements-dev.txt`) y bundlea el único recurso no-Python del
+proyecto (el mapa base GPS). **Las bases de datos no se empaquetan**: siguen siendo PostgreSQL/MongoDB/Neo4j
+externos, con un `.env` junto al ejecutable (o en el directorio de trabajo).
+
+**Verificado en este cierre:** `python scripts/empaquetar.py --limpio` compiló sin errores y generó
+`dist/PlataformaLogistica/PlataformaLogistica.exe` (15,4 MB) + `_internal/` con el GeoJSON del mapa. Se
+lanzó dos veces: sin `.env` junto al ejecutable, cierra en segundos con código 2 y sin ventana (falta una
+variable de entorno obligatoria — comportamiento esperado, no un crash); con una copia temporal del `.env`
+real (borrada después de la prueba, nunca commiteada), abrió la ventana "Iniciar sesión · Plataforma de
+logística" conectada a los tres motores reales. No se inició sesión ni se tocó ningún dato: solo se confirmó
+que arranca. **No se probó el recorrido completo de pantallas sobre el ejecutable** (solo el arranque).
+
+
+**Todavía no se corrió contra la base de desarrollo real** (requiere la contraseña del administrador
+existente, que el agente no debe conocer ni pedir) ni se probó a mano en la ventana. Para correrlo, ver la
+sección de comandos al final de este documento.
+
 
 ## Probar monitoreo desde la ventana (fase 4)
 

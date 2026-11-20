@@ -1,3 +1,6 @@
 -r requirements.txt
 pytest>=8.0
 pglast>=6.0
+# Empaquetado del ejecutable (fase 9, scripts/empaquetar.py). No se usa en producción; solo para generar
+# el entregable de dist/.
+pyinstaller>=6.0

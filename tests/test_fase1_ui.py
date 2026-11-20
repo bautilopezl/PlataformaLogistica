@@ -178,6 +178,7 @@ def servicios(acceso=None, terceros=None, auditoria=None) -> Servicios:
         comercial=object(),
         reportes=object(),
         predicciones=object(),
+        reconciliacion=object(),
         procesos=FakeProcesos(),
     )
 
@@ -489,6 +490,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
     from logistica.services.catalogo_service import CatalogoService
     from logistica.services.comercial_service import ComercialService
     from logistica.services.prediccion_service import PrediccionService
+    from logistica.services.reconciliacion_service import ReconciliacionService
     from logistica.services.reporte_service import ReporteService
     from logistica.services.comunicacion_service import ComunicacionService
     from logistica.services.envio_service import EnvioService
@@ -520,6 +522,7 @@ def test_de_punta_a_punta_login_y_terceros_desde_la_ui(qapp, tx_connections):
         ComercialService(tx_connections, aut),
         ReporteService(tx_connections, aut, ROOT / "reportes"),
         PrediccionService(tx_connections, aut),
+        ReconciliacionService(tx_connections),
         FakeProcesos(),  # el planificador real correría tareas sobre la conexión única de la prueba
     )
     sufijo = uuid.uuid4().hex[:8]
