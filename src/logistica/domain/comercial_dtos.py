@@ -57,6 +57,7 @@ class FacturaDTO:
     anulada_en: datetime | None
     motivo_anulacion: str | None
     aplicado: Decimal  # suma de aplicaciones vigentes
+    envio_codigos: str | None = None  # envíos de sus renglones ("ENV-…, ENV-…"); una compra puede no tener
     renglones: list[RenglonDTO] = field(default_factory=list)
 
     @property
@@ -142,3 +143,68 @@ class CierreDTO:
     total_disminuciones: Decimal
     saldo_final: Decimal
     cerrado_en: datetime
+
+
+@dataclass(frozen=True)
+class ResumenComercialEnvioDTO:
+    """Todo lo comercial de UN envío, para operar desde su contexto: cliente, precio (cargos), situación de la
+    facturación y sus facturas de venta con el saldo de cada una."""
+
+    envio_id: uuid.UUID
+    envio_codigo: str
+    envio_estado: str
+    cliente_id: uuid.UUID
+    cliente_razon_social: str
+    cargos: list[CargoDTO]
+    facturas: list[FacturaDTO]  # de VENTA que incluyen este envío (vigentes y anuladas)
+    situacion: str  # SituacionComercial
+    mensaje: str
+    facturacion_estado: str | None  # estado de la entrega FACTURACION (None: aún no se confirmó la entrega)
+    facturacion_intentos: int
+
+    @property
+    def pendiente_por_moneda(self) -> dict[str, Decimal]:
+        """Importe de los cargos PENDIENTES de facturar, por moneda (no se suman monedas distintas)."""
+        totales: dict[str, Decimal] = {}
+        for c in self.cargos:
+            if c.estado == "PENDIENTE":
+                totales[c.moneda_codigo] = totales.get(c.moneda_codigo, Decimal("0")) + c.importe
+        return totales
+
+
+@dataclass(frozen=True)
+class EmisorDTO:
+    """Datos de la plataforma configurados en el entorno (EMISOR_*). Vacíos si no se configuraron: el
+    comprobante lo dice en lugar de inventarlos."""
+
+    razon_social: str | None = None
+    identificacion: str | None = None
+    domicilio: str | None = None
+
+    @property
+    def configurado(self) -> bool:
+        return bool(self.razon_social)
+
+
+@dataclass(frozen=True)
+class ContraparteDTO:
+    razon_social: str
+    pais_codigo: str
+    tipo_identificacion: str
+    numero_identificacion: str
+    direccion: str | None
+    email: str | None
+
+
+@dataclass(frozen=True)
+class ComprobanteDTO:
+    """Representación académica/interna de una factura con sus importes PERSISTIDOS (no se recalcula con
+    precios actuales) y el estado de cobranza a la fecha `generado_en`."""
+
+    factura: FacturaDTO  # con renglones
+    contraparte: ContraparteDTO
+    emisor: EmisorDTO
+    envio_codigos: dict[uuid.UUID, str]  # envío de cada renglón (por id)
+    aplicaciones: list[AplicacionDTO]  # vigentes y anuladas
+    generado_en: datetime
+    generado_por: str

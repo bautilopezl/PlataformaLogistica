@@ -115,7 +115,9 @@ _SELECT_FACTURA = """
            f.vence_en, f.moneda_codigo, f.importe_total, f.estado, f.creado_en, f.anulada_en,
                f.motivo_anulacion,
            COALESCE((SELECT sum(a.monto_aplicado) FROM pago_aplicacion a
-                     WHERE a.factura_id = f.id AND a.anulada_en IS NULL), 0) AS aplicado
+                     WHERE a.factura_id = f.id AND a.anulada_en IS NULL), 0) AS aplicado,
+           (SELECT string_agg(DISTINCT e.codigo, ', ' ORDER BY e.codigo) FROM factura_detalle d
+              JOIN envio e ON e.id = d.envio_id WHERE d.factura_id = f.id) AS envio_codigos
     FROM factura f
     JOIN tercero t ON t.id = f.tercero_id
 """
@@ -236,6 +238,16 @@ class FacturaRepository:
             else None
         )
 
+    def codigos_envio(self, tx: Session, envio_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """Código de cada envío citado en los renglones (para el comprobante)."""
+        if not envio_ids:
+            return {}
+        rows = tx.execute(
+            text("SELECT id, codigo FROM envio WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": [str(i) for i in envio_ids]},
+        )
+        return {r.id: r.codigo for r in rows}
+
     def existe_compra(self, tx: Session, tercero_id: uuid.UUID, tipo: str, serie: str, numero: str) -> bool:
         return tx.execute(
             text(
@@ -266,12 +278,14 @@ class FacturaRepository:
         sentido: str | None = None,
         estado: str | None = None,
         envio_id: uuid.UUID | None = None,
+        tercero_id: uuid.UUID | None = None,
         limite: int = 500,
     ) -> list[FacturaDTO]:
         rows = tx.execute(
             text(
                 _SELECT_FACTURA
                 + " WHERE (CAST(:t AS uuid) IS NULL OR f.tercero_id = :t) AND f.sentido = ANY(:sentidos)"
+                " AND (CAST(:tt AS uuid) IS NULL OR f.tercero_id = :tt)"
                 " AND (CAST(:s AS varchar) IS NULL OR f.sentido = :s)"
                 " AND (CAST(:estado AS varchar) IS NULL OR f.estado = :estado)"
                 " AND (CAST(:e AS uuid) IS NULL OR EXISTS (SELECT 1 FROM factura_detalle d"
@@ -280,6 +294,7 @@ class FacturaRepository:
             ),
             {
                 "t": alcance.tercero_id,
+                "tt": tercero_id,
                 "sentidos": alcance.sentidos_factura,
                 "s": sentido,
                 "estado": estado,

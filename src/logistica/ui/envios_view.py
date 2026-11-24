@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -39,6 +40,7 @@ from logistica.domain.logistica_dtos import EnvioDetalleDTO, EnvioDTO
 from logistica.services.catalogo_service import CatalogoService
 from logistica.services.envio_service import EnvioService
 from logistica.services.tercero_service import TerceroService
+from logistica.ui.comercial_dialogos import SITUACIONES_ATENCION, abrir_cargos_envio, avisar
 from logistica.ui.widgets import Campo, VistaBase, clave_seleccionada, fecha_local, llenar_tabla, pedir, tabla
 
 
@@ -67,9 +69,11 @@ class EnviosView(VistaBase):
         sesion_id: uuid.UUID,
         permisos: frozenset[str],
         parent: QWidget | None = None,
+        comercial: Any = None,
     ):
         super().__init__(sesion_id, parent)
         self._envios, self._catalogo, self._terceros, self._permisos = envios, catalogo, terceros, permisos
+        self._comercial = comercial  # opcional: habilita «Cargos / facturación» en el detalle
         self._lista: dict[uuid.UUID, EnvioDTO] = {}
         self.filtro_estado = QComboBox()
         self.filtro_estado.addItem("Todos los estados", None)
@@ -171,7 +175,14 @@ class EnviosView(VistaBase):
 
     def _abrir_detalle(self, envio_id: uuid.UUID) -> None:
         dialogo = EnvioDetalleDialog(
-            self, self._envios, self._catalogo, self._terceros, self.sesion_id, envio_id, self._permisos
+            self,
+            self._envios,
+            self._catalogo,
+            self._terceros,
+            self.sesion_id,
+            envio_id,
+            self._permisos,
+            self._comercial,
         )
         dialogo.detalle.sesion_vencida.connect(self.sesion_vencida)
         dialogo.exec()
@@ -197,10 +208,13 @@ class EnvioDetalleDialog(QDialog):
         sesion_id: uuid.UUID,
         envio_id: uuid.UUID,
         permisos: frozenset[str],
+        comercial: Any = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Envío")
-        self.detalle = EnvioDetalleView(envios, catalogo, terceros, sesion_id, envio_id, permisos, self)
+        self.detalle = EnvioDetalleView(
+            envios, catalogo, terceros, sesion_id, envio_id, permisos, self, comercial=comercial
+        )
         self.detalle.sesion_vencida.connect(lambda _m: self.reject())
         QVBoxLayout(self).addWidget(self.detalle)
         self.resize(1000, 640)
@@ -217,10 +231,21 @@ class EnvioDetalleView(VistaBase):
         envio_id: uuid.UUID,
         permisos: frozenset[str],
         parent: QWidget | None = None,
+        comercial: Any = None,
     ):
         super().__init__(sesion_id, parent)
         self._envios, self._catalogo, self._terceros, self.envio_id = envios, catalogo, terceros, envio_id
+        self._comercial, self._permisos = comercial, permisos
         self.det: EnvioDetalleDTO | None = None
+        # Situación comercial (precio/facturación): la ven internos que planifican o gestionan lo comercial.
+        self._ver_comercial = comercial is not None and bool(
+            {"envios.planificar", "cargos.gestionar", "facturas.emitir"} & set(permisos)
+        )
+        self._gestion_comercial = comercial is not None and bool(
+            {"cargos.gestionar", "facturas.emitir"} & set(permisos)
+        )
+        self.comercial = QLabel("")
+        self.comercial.setWordWrap(True)
         self.cabecera = QLabel("Cargando…")
         self.cabecera.setObjectName("titulo")
         self.datos = QLabel("")
@@ -269,6 +294,7 @@ class EnvioDetalleView(VistaBase):
             ("evento", "Registrar evento", self.registrar_evento, ejecutar),
             ("entregar", "Confirmar entrega", self.confirmar_entrega, planificar),
             ("cancelar", "Cancelar envío", self.cancelar, planificar),
+            ("comercial", "Cargos / facturación", self.cargos_facturacion, self._gestion_comercial),
         ]
         for i, (clave, texto, accion, visible) in enumerate(acciones):
             b = QPushButton(texto)
@@ -280,6 +306,8 @@ class EnvioDetalleView(VistaBase):
         layout = QVBoxLayout(self)
         layout.addWidget(self.cabecera)
         layout.addWidget(self.datos)
+        if self._ver_comercial:
+            layout.addWidget(self.comercial)
         if planificar:
             layout.addWidget(QLabel(
                 "Definí las condiciones antes de iniciar: pestaña Monitoreo → seleccioná este envío "
@@ -365,6 +393,22 @@ class EnvioDetalleView(VistaBase):
             ],
             [ev.id for ev in eventos],
         )
+        if self._ver_comercial:
+            self.ejecutar(self._comercial.situacion_envio, self._mostrar_comercial, self.sesion_id, self.envio_id)
+
+    def _mostrar_comercial(self, situacion: tuple[str, str]) -> None:
+        codigo, mensaje = situacion
+        self.comercial.setText("Comercial: " + mensaje)
+        self.comercial.setProperty("estado", "error" if codigo in SITUACIONES_ATENCION else "ok")
+        self.comercial.style().unpolish(self.comercial)
+        self.comercial.style().polish(self.comercial)
+
+    def cargos_facturacion(self) -> None:
+        """Precio de venta, facturas y cobro de ESTE envío, con el cliente ya elegido."""
+        abrir_cargos_envio(
+            self, self._comercial, self.sesion_id, self.envio_id, self._permisos, self.sesion_vencida.emit
+        )
+        self.recargar()
 
     def _tramo_seleccionado(self):
         clave = clave_seleccionada(self.tramos)
@@ -523,8 +567,31 @@ class EnvioDetalleView(VistaBase):
         v = pedir(self, "Confirmar entrega", [Campo("fecha", "Entregado el", "fecha_hora")])
         if v:
             self.ejecutar(
-                self._envios.confirmar_entrega, self._hecho, self.sesion_id, self.envio_id, v["fecha"]
+                self._envios.confirmar_entrega, self._entregado, self.sesion_id, self.envio_id, v["fecha"]
             )
+
+    def _entregado(self, _envio: Any) -> None:
+        """La entrega ya quedó confirmada (un problema comercial no la bloquea). Si el envío no tiene precio,
+        se avisa y, a quien puede, se ofrece cargarlo; la factura se emite cuando haya cargos."""
+        self.recargar()
+        if self._ver_comercial:
+            self.ejecutar(self._comercial.situacion_envio, self._avisar_tras_entrega, self.sesion_id, self.envio_id)
+
+    def _avisar_tras_entrega(self, situacion: tuple[str, str]) -> None:
+        codigo, mensaje = situacion
+        if codigo != "SIN_PRECIO":
+            return
+        texto = "Entrega confirmada.\n\n" + mensaje
+        if not self._gestion_comercial:
+            avisar(self, "Entrega confirmada sin precio", texto + "\n\nAvisá a Comercial.")
+            return
+        respuesta = QMessageBox.question(
+            self,
+            "Entrega confirmada sin precio",
+            texto + "\n\n¿Cargar ahora el precio de venta? Después se emite con «Facturar pendientes».",
+        )
+        if respuesta == QMessageBox.StandardButton.Yes:
+            self.cargos_facturacion()
 
     def cancelar(self) -> None:
         v = pedir(self, "Cancelar envío", [Campo("motivo", "Motivo", obligatorio=True)])
@@ -546,6 +613,7 @@ class EnvioDetalleView(VistaBase):
             "evento": estado in ("PLANIFICADO", "EN_TRANSITO"),
             "entregar": estado == "EN_TRANSITO",
             "cancelar": editable,
+            "comercial": True,
         }
         for clave, b in self.botones.items():
             b.setEnabled(libre and habilitar[clave])

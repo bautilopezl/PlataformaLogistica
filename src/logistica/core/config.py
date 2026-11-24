@@ -81,6 +81,11 @@ class AppConfig:
     # Carpeta local de los archivos de reportes (fase 7). SUPUESTO R1 (AGENTS.md §16.7): cada equipo guarda
     # los suyos; en otro equipo un reporte se vuelve a generar desde sus parámetros registrados.
     reportes_dir: Path = PROJECT_ROOT / "reportes"
+    # Identificación de la plataforma en los comprobantes PDF (opcional: EMISOR_RAZON_SOCIAL,
+    # EMISOR_IDENTIFICACION, EMISOR_DOMICILIO). Si falta, el PDF lo indica en lugar de inventarla.
+    emisor_razon_social: str | None = None
+    emisor_identificacion: str | None = None
+    emisor_domicilio: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,4 +151,5 @@ def load_config(env_file: str | os.PathLike | None = None) -> AppConfig:
     if not reportes_dir.is_absolute():
         reportes_dir = PROJECT_ROOT / reportes_dir
     return AppConfig(admin, app, mongo, neo, _env("LOG_LEVEL", "INFO").upper(), log_dir, timeout, security,
-                     reportes_dir)
+                     reportes_dir, _env("EMISOR_RAZON_SOCIAL") or None, _env("EMISOR_IDENTIFICACION") or None,
+                     _env("EMISOR_DOMICILIO") or None)

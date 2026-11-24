@@ -3,6 +3,8 @@
 Internos con permisos comerciales operan; un cliente u operador ve solo su lado (por cobrar / por pagar), en
 modo consulta. Ocultar botones es comodidad: el servicio vuelve a validar permiso y alcance en cada operación.
 La facturación automática no tiene botón: la emite el proceso de la outbox al confirmarse la entrega.
+El detalle de factura (con PDF), el contexto comercial de un envío y el cobro precargado de una factura están en
+`comercial_dialogos.py`, compartidos con el detalle del envío.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -28,6 +29,15 @@ from PySide6.QtWidgets import (
 from logistica.domain import comercial as dc
 from logistica.domain.acceso import Permiso, Principal
 from logistica.domain.comercial_dtos import CuentaDTO, FacturaDTO, PagoDTO
+from logistica.ui.comercial_dialogos import (
+    SITUACIONES_ATENCION,
+    CobroFactura,
+    abrir_factura,
+    avisar,
+    boton_cobro_texto,
+    factura_cobrable,
+    pedir_cargo,
+)
 from logistica.ui.widgets import (
     Campo,
     VistaBase,
@@ -50,6 +60,7 @@ COL_FACTURAS = (
     "Aplicado",
     "Pendiente",
     "Estado",
+    "Envío",  # al final: no corre los índices de las columnas existentes
 )
 COL_CARGOS = ("Concepto", "Cantidad", "Precio unitario", "Importe", "Moneda", "Estado", "Creado")
 COL_PAGOS = ("Fecha", "Tercero", "Tipo", "Medio", "Moneda", "Monto", "Aplicado", "Disponible", "Estado")
@@ -57,13 +68,12 @@ COL_CUENTAS = ("Tercero", "Cuenta", "Moneda", "Saldo", "Último cierre")
 COL_MOVIMIENTOS = ("Fecha", "Movimiento", "Importe", "Descripción")
 COL_CIERRES = ("Período", "Saldo inicial", "Aumentos", "Disminuciones", "Saldo final", "Cerrado")
 NATURALEZA = {"COBRAR": "Por cobrar", "PAGAR": "Por pagar"}
-SENTIDO = {"VENTA": "Venta", "COMPRA": "Compra", "COBRO": "Cobro", "PAGO": "Pago"}
 MONEDAS = (("USD", "USD"), ("ARS", "ARS"), ("EUR", "EUR"), ("BRL", "BRL"))
 MEDIOS = tuple((m.value.capitalize(), m.value) for m in dc.Medio)
 
 
 def _dinero(valor: Decimal | None) -> str:
-    return "" if valor is None else f"{valor:,.2f}"
+    return dc.formato_dinero(valor)
 
 
 def _meses_cerrables(cantidad: int = 12) -> list[tuple[str, date]]:
@@ -103,6 +113,7 @@ class ComercialView(VistaBase):
         # (el usuario cambió de filtro o de cuenta) se descarta en lugar de mezclarse con la actual.
         self._ficha_facturas = 0
         self._ficha_cuenta = 0
+        self._cobro = CobroFactura(self, comercial)
 
         self.pestanias = QTabWidget()
         self.pestanias.addTab(self._armar_facturas(), "Facturas")
@@ -117,7 +128,9 @@ class ComercialView(VistaBase):
         layout.addWidget(self.pestanias)
         fila = QHBoxLayout()
         fila.addWidget(recargar)
-        fila.addWidget(QLabel("Las facturas de venta se emiten solas al confirmarse la entrega del envío."))
+        fila.addWidget(QLabel(
+            "Venta: la emitimos al cliente al confirmarse la entrega (si el envío tiene precio) y se cancela con "
+            "un COBRO. Compra: la registramos al recibirla de un proveedor y se cancela con un PAGO."))
         fila.addStretch()
         layout.addLayout(fila)
         layout.addWidget(self.estado)
@@ -147,10 +160,16 @@ class ComercialView(VistaBase):
         self.filtro_estado.currentIndexChanged.connect(self.recargar_facturas)
         self.tabla_facturas = tabla(COL_FACTURAS)
         self.tabla_facturas.itemSelectionChanged.connect(self.actualizar_botones)
-        botones, (self.b_detalle, self.b_anular, self.b_compra) = self._botonera(
-            ("Ver detalle", self.ver_factura, True),
+        self.tabla_facturas.doubleClicked.connect(self.ver_factura)
+        botones, (self.b_detalle, self.b_cobrar, self.b_anular, self.b_compra) = self._botonera(
+            ("Ver detalle / PDF", self.ver_factura, True),
+            (
+                "Registrar cobro de esta factura",
+                self.cobrar_factura,
+                self.puede["registrar_pago"] and self.puede["aplicar"],
+            ),
             ("Anular factura", self.anular_factura, self.puede["anular"]),
-            ("Registrar factura de compra", self.registrar_compra, self.puede["emitir"]),
+            ("Registrar factura de COMPRA recibida…", self.registrar_compra, self.puede["emitir"]),
         )
         filtros = QHBoxLayout()
         filtros.addWidget(self.filtro_sentido)
@@ -166,20 +185,28 @@ class ComercialView(VistaBase):
         w = QWidget()
         self.envio = QComboBox()
         self.envio.currentIndexChanged.connect(self.recargar_cargos)
+        self._resumen: Any = None
         self.tabla_cargos = tabla(COL_CARGOS)
         self.tabla_cargos.itemSelectionChanged.connect(self.actualizar_botones)
         botones, (self.b_cargo, self.b_cancelar_cargo, self.b_facturar) = self._botonera(
-            ("Nuevo cargo", self.nuevo_cargo, self.puede["cargos"]),
+            ("Agregar precio / cargo", self.nuevo_cargo, self.puede["cargos"]),
             ("Cancelar cargo", self.cancelar_cargo, self.puede["cargos"]),
             ("Facturar pendientes", self.facturar_pendientes, self.puede["emitir"]),
         )
+        self.situacion_envio = QLabel("")
+        self.situacion_envio.setWordWrap(True)
         fila = QHBoxLayout()
         fila.addWidget(QLabel("Envío:"))
         fila.addWidget(self.envio, 1)
         layout = QVBoxLayout(w)
         layout.addLayout(fila)
+        layout.addWidget(self.situacion_envio)
+        layout.addWidget(QLabel("Precio de venta al cliente (cargos). No es el costo de los tramos:"))
         layout.addWidget(self.tabla_cargos)
-        layout.addWidget(QLabel("Facturar a mano: cargos agregados después de la entrega o de reemplazo."))
+        layout.addWidget(QLabel(
+            "«Facturar pendientes» emite la factura de VENTA de los cargos pendientes de un envío ENTREGADO "
+            "(cargados después de la entrega, de reemplazo, o si falló la facturación automática). También "
+            "desde Envíos → Abrir → Cargos / facturación."))
         layout.addLayout(botones)
         return w
 
@@ -246,7 +273,7 @@ class ComercialView(VistaBase):
                 (
                     f.codigo,
                     f.tercero_razon_social,
-                    SENTIDO[f.sentido],
+                    dc.etiqueta_sentido_factura(f.sentido),
                     fecha_local(f.emitida_en),
                     fecha_local(f.vence_en),
                     f.moneda_codigo,
@@ -254,6 +281,7 @@ class ComercialView(VistaBase):
                     _dinero(f.aplicado),
                     _dinero(f.pendiente),
                     f.estado,
+                    f.envio_codigos or "",
                 )
                 for f in facturas
             ],
@@ -278,10 +306,30 @@ class ComercialView(VistaBase):
 
     def recargar_cargos(self) -> None:
         envio_id = self.envio.currentData()
+        self._resumen = None
         if envio_id is None:
             llenar_tabla(self.tabla_cargos, [], [])
+            self.situacion_envio.setText("")
             return
-        self.ejecutar(self._com.cargos, self._mostrar_cargos, self.sesion_id, envio_id)
+        self.ejecutar(self._com.resumen_envio, self._mostrar_resumen, self.sesion_id, envio_id)
+
+    def _mostrar_resumen(self, r: Any) -> None:
+        if r.envio_id != self.envio.currentData():
+            return  # respuesta de un envío que ya no está elegido
+        self._resumen = r
+        pendiente = r.pendiente_por_moneda
+        self.situacion_envio.setText(
+            f"Cliente: {r.cliente_razon_social}. {r.mensaje}"
+            + (
+                " Pendiente de facturar: " + " · ".join(f"{m} {_dinero(v)}" for m, v in sorted(pendiente.items()))
+                if pendiente
+                else ""
+            )
+        )
+        self.situacion_envio.setProperty("estado", "error" if r.situacion in SITUACIONES_ATENCION else "ok")
+        self.situacion_envio.style().unpolish(self.situacion_envio)
+        self.situacion_envio.style().polish(self.situacion_envio)
+        self._mostrar_cargos(r.cargos)
 
     def _mostrar_cargos(self, cargos: list[Any]) -> None:
         llenar_tabla(
@@ -289,7 +337,7 @@ class ComercialView(VistaBase):
             [
                 (
                     c.concepto,
-                    c.cantidad,
+                    c.cantidad.normalize(),
                     c.precio_unitario,
                     _dinero(c.importe),
                     c.moneda_codigo,
@@ -310,7 +358,7 @@ class ComercialView(VistaBase):
                 (
                     fecha_local(p.fecha),
                     p.tercero_razon_social,
-                    SENTIDO[p.sentido],
+                    dc.etiqueta_sentido_pago(p.sentido),
                     p.medio,
                     p.moneda_codigo,
                     _dinero(p.monto),
@@ -410,24 +458,19 @@ class ComercialView(VistaBase):
 
     # ------------------------------------------------------------------ facturas
     def ver_factura(self) -> None:
+        """Detalle legible con «Exportar PDF» y, si corresponde, el cobro/pago de esa factura."""
         factura_id = clave_seleccionada(self.tabla_facturas)
-        if factura_id is not None:
-            self.ejecutar(self._com.factura, self._mostrar_detalle, self.sesion_id, factura_id)
+        if factura_id is not None and abrir_factura(
+            self, self._com, self.sesion_id, factura_id, self._p.permisos, self.sesion_vencida.emit
+        ):
+            self.recargar()
 
-    def _mostrar_detalle(self, f: FacturaDTO) -> None:
-        self._set_estado("Detalle cargado.", "ok")
-        renglones = "\n".join(
-            f"{r.renglon}. {r.concepto}: {r.cantidad} × {r.precio_unitario} = {_dinero(r.subtotal)}"
-            for r in f.renglones
-        )
-        texto = (
-            f"{f.codigo} · {SENTIDO[f.sentido]} · {f.tercero_razon_social}\n\n{renglones}\n\n"
-            f"Total {f.moneda_codigo} {_dinero(f.importe_total)} · Aplicado {_dinero(f.aplicado)} · "
-            f"Pendiente {_dinero(f.pendiente)}\nEstado: {f.estado}"
-        )
-        if f.motivo_anulacion:
-            texto += f"\nAnulada el {fecha_local(f.anulada_en)}: {f.motivo_anulacion}"
-        QMessageBox.information(self, "Factura", texto)
+    def cobrar_factura(self) -> None:
+        """Cobro (venta) o pago (compra) precargado con tercero, moneda y saldo; registrar y aplicar van en una
+        sola transacción. El usuario confirma importe, fecha y medio."""
+        factura = self._facturas.get(clave_seleccionada(self.tabla_facturas))
+        if factura_cobrable(factura):
+            self._cobro.iniciar(factura, lambda _r: self.recargar())
 
     def anular_factura(self) -> None:
         factura_id = clave_seleccionada(self.tabla_facturas)
@@ -483,17 +526,18 @@ class ComercialView(VistaBase):
         ahora = datetime.now().astimezone()
         valores = pedir(
             self,
-            "Factura de compra (la emite el operador o proveedor)",
+            "Factura de COMPRA recibida: nos la emite un operador/proveedor y genera una deuda A PAGAR "
+            "(no es una venta ni sirve para aplicar cobros de clientes)",
             [
-                Campo("tercero", "Emisor", "opciones", opciones=opciones),
-                Campo("serie", "Serie / punto de venta", obligatorio=True),
-                Campo("numero", "Número", obligatorio=True),
+                Campo("tercero", "Proveedor/operador que la emitió", "opciones", opciones=opciones),
+                Campo("serie", "Serie / punto de venta del proveedor", obligatorio=True),
+                Campo("numero", "Número del comprobante del proveedor", obligatorio=True),
                 Campo("emitida", "Emitida", "fecha_hora", valor=ahora),
                 Campo("vence", "Vence", "fecha_hora", valor=ahora),
                 Campo("moneda", "Moneda", "opciones", opciones=MONEDAS),
-                Campo("concepto", "Concepto", obligatorio=True),
+                Campo("concepto", "Servicio que nos facturan (ej. Flete tramo 1)", obligatorio=True),
                 Campo("cantidad", "Cantidad", valor="1", obligatorio=True),
-                Campo("precio", "Precio unitario", obligatorio=True),
+                Campo("precio", "Precio unitario que nos cobran", obligatorio=True),
             ],
             validar=lambda v: self._compra(v).normalizado(datetime.now(timezone.utc)),
         )
@@ -522,29 +566,18 @@ class ComercialView(VistaBase):
         envio_id = self.envio.currentData()
         if envio_id is None:
             return
-        valores = pedir(
-            self,
-            "Nuevo cargo (lo que se le cobra al cliente)",
-            [
-                Campo("concepto", "Concepto", obligatorio=True),
-                Campo("cantidad", "Cantidad", valor="1", obligatorio=True),
-                Campo("precio", "Precio unitario", obligatorio=True),
-                Campo("moneda", "Moneda", "opciones", opciones=MONEDAS),
-            ],
-            validar=lambda v: self._cargo(v).normalizado(),
+        r = self._resumen if self._resumen is not None and self._resumen.envio_id == envio_id else None
+        datos = pedir_cargo(
+            self, r.envio_codigo if r else self.envio.currentText(), r.cliente_razon_social if r else "-"
         )
-        if valores is not None:
+        if datos is not None:
             self.ejecutar(
                 self._com.crear_cargo,
                 lambda _c: self.recargar_cargos(),
                 self.sesion_id,
                 envio_id,
-                self._cargo(valores),
+                datos,
             )
-
-    @staticmethod
-    def _cargo(v: dict[str, Any]) -> dc.CargoDatos:
-        return dc.CargoDatos(v["concepto"], v["cantidad"], v["precio"], v["moneda"])
 
     def cancelar_cargo(self) -> None:
         cargo_id = clave_seleccionada(self.tabla_cargos)
@@ -559,8 +592,15 @@ class ComercialView(VistaBase):
             self.ejecutar(self._com.emitir_factura, self._facturado, self.sesion_id, envio_id)
 
     def _facturado(self, facturas: list[FacturaDTO]) -> None:
-        self._set_estado("Emitida(s): " + ", ".join(f.codigo for f in facturas), "ok")
         self.recargar()
+        avisar(
+            self,
+            "Factura emitida",
+            "Se emitió: "
+            + "; ".join(f"{f.codigo} por {f.moneda_codigo} {_dinero(f.importe_total)}" for f in facturas)
+            + ".\nEl cobro no se registra solo: en Facturas, seleccioná la factura → «Registrar cobro de esta "
+            "factura» cuando recibas el dinero.",
+        )
 
     # ------------------------------------------------------------------ pagos
     def registrar_pago(self) -> None:
@@ -571,9 +611,15 @@ class ComercialView(VistaBase):
         opciones = [(t.razon_social, t.id) for t in terceros if t.activo and t.roles_comerciales]
         valores = pedir(
             self,
-            "Registrar cobro o pago",
+            "Registrar cobro o pago SIN factura elegida (queda disponible para aplicar después). Para cobrar una "
+            "factura concreta usá Facturas → «Registrar cobro de esta factura».",
             [
-                Campo("tercero", "Tercero", "opciones", opciones=opciones),
+                Campo(
+                    "tercero",
+                    "Tercero (cliente si es cobro; operador/proveedor si es pago)",
+                    "opciones",
+                    opciones=opciones,
+                ),
                 Campo(
                     "sentido",
                     "Tipo",
@@ -615,21 +661,43 @@ class ComercialView(VistaBase):
         )
 
     def aplicar_pago(self) -> None:
+        """Las facturas candidatas se consultan en la base (no dependen del filtro de la pestaña Facturas)."""
         pago = self._pagos.get(clave_seleccionada(self.tabla_pagos))
         if pago is None:
             return
-        sentido = dc.Sentido.VENTA if pago.sentido == dc.SentidoPago.COBRO else dc.Sentido.COMPRA
-        candidatas = [
-            f
-            for f in self._facturas.values()
-            if f.estado == "EMITIDA"
-            and f.pendiente > 0
-            and (f.tercero_id, f.moneda_codigo, f.sentido) == (pago.tercero_id, pago.moneda_codigo, sentido)
-        ]
+        self.ejecutar(
+            partial(self._com.facturas_aplicables, self.sesion_id, pago.id),
+            lambda r: self._pedir_aplicacion(pago, *r),
+        )
+
+    def _pedir_aplicacion(self, pago: PagoDTO, candidatas: list[FacturaDTO], otras: list[FacturaDTO]) -> None:
         if not candidatas:
-            self._set_estado(
-                "No hay facturas con saldo de ese tercero y moneda (revise el filtro de facturas).", "error"
+            cobro = pago.sentido == dc.SentidoPago.COBRO
+            texto = (
+                f"No hay facturas de {'VENTA' if cobro else 'COMPRA'} emitidas con saldo de "
+                f"{pago.tercero_razon_social} en {pago.moneda_codigo}. "
+                + (
+                    "Un cobro solo se aplica a facturas de venta a ese cliente."
+                    if cobro
+                    else "Un pago solo se aplica a facturas de compra de ese proveedor/operador."
+                )
             )
+            if otras:
+                texto += (
+                    f"\n\nEse tercero tiene {len(otras)} factura(s) de "
+                    f"{'COMPRA' if cobro else 'VENTA'} con saldo ("
+                    + ", ".join(f.codigo for f in otras[:5])
+                    + "): no se cancelan con un "
+                    + ("cobro de cliente." if cobro else "pago a proveedor.")
+                )
+            if cobro:
+                texto += (
+                    "\n\nSi el envío todavía no tiene factura de venta: Envíos → Abrir → «Cargos / facturación» "
+                    "→ «Agregar precio / cargo» y, si ya está entregado, «Facturar pendientes». El cobro queda "
+                    "disponible y se aplica después, sin registrarlo de nuevo."
+                )
+            self._set_estado(texto.split("\n")[0], "error")
+            avisar(self, "Sin facturas para aplicar", texto)
             return
         valores = pedir(
             self,
@@ -639,7 +707,10 @@ class ComercialView(VistaBase):
                     "factura",
                     "Factura",
                     "opciones",
-                    opciones=[(f"{f.codigo} · debe {_dinero(f.pendiente)}", f.id) for f in candidatas],
+                    opciones=[
+                        (f"{f.codigo} · {f.envio_codigos or 'sin envío'} · debe {_dinero(f.pendiente)}", f.id)
+                        for f in candidatas
+                    ],
                 ),
                 Campo(
                     "monto",
@@ -741,6 +812,8 @@ class ComercialView(VistaBase):
         cuenta = clave_seleccionada(self.tabla_cuentas)
         self.boton_recargar.setEnabled(libre)
         self.b_detalle.setEnabled(libre and factura is not None)
+        self.b_cobrar.setEnabled(libre and factura_cobrable(factura))
+        self.b_cobrar.setText(boton_cobro_texto(factura))
         self.b_anular.setEnabled(libre and factura is not None and factura.estado == "EMITIDA")
         self.b_compra.setEnabled(libre)
         if hasattr(self, "b_cargo"):

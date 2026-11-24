@@ -135,9 +135,36 @@ elegir la cuenta y **Cerrar período** (solo meses terminados; repetirlo devuelv
 **Quién ve qué.** Comercial y Administración operan; Operaciones no ve la pestaña. Un cliente ve solo sus
 facturas, cobros y su cuenta **por cobrar**; un operador solo lo que se le debe (**por pagar**).
 
-**Prueba manual sugerida (pendiente del grupo):** entrar como Comercial y cargar un cargo a un envío en tránsito;
-como Operaciones, confirmar la entrega; volver a **Comercial → Facturas** y ver la factura `FV-…`; registrar un
-cobro parcial, aplicarlo y ver el saldo en **Cuentas corrientes**; anular una factura con y sin refacturación.
+**Envío, cargo, factura y cobro son cosas distintas.** El *costo* de un tramo (lo que nos cobra el operador) no es
+el *precio de venta*: el precio al cliente son los **cargos** del envío. Sin cargos no hay factura (no se inventan
+importes ni impuestos). Emitir una factura **no** registra un cobro: el cobro se registra cuando efectivamente se
+recibe el dinero. **Venta** (FV-…, la emitimos al cliente) se cancela con un **cobro**; **compra** (la registramos al
+recibirla de un operador/proveedor) se cancela con un **pago**. Un cobro nunca se aplica a una factura de compra.
+
+**Recorrido desde la interfaz (Comercial o Administración):**
+1. **Envíos → Nuevo envío** → completar → (se abre el detalle) **Definir tramos**, **Asignar contenedor**,
+   **Planificar**, **Iniciar tramo**…
+2. En el detalle del envío: **Cargos / facturación** → **Agregar precio / cargo** (concepto, cantidad, precio
+   unitario de venta y moneda). La línea *Comercial:* del detalle muestra si falta el precio.
+3. **Finalizar tramo** → **Confirmar entrega**. La entrega nunca se bloquea por un problema comercial: si el envío
+   no tiene precio se avisa y se ofrece cargarlo. Con precio, la factura de venta se emite sola (≤ 1 min con una
+   instancia interna abierta). Cargos agregados después de entregar, de reemplazo o con la facturación automática
+   FALLIDA: **Cargos / facturación → Facturar pendientes** (informa la factura emitida).
+4. **Cargos / facturación → Ver factura / PDF** (o **Comercial → Facturas → Ver detalle / PDF**): detalle legible y
+   **Exportar PDF** (`REPORTES_DIR/comprobantes`). Es un documento **académico/interno sin validez fiscal** (no es un
+   comprobante autorizado por ARCA); usa los importes guardados en la factura y muestra aparte el estado de
+   cobranza a la fecha. El emisor sale de `EMISOR_RAZON_SOCIAL`, `EMISOR_IDENTIFICACION`, `EMISOR_DOMICILIO`
+   (opcionales, ver `.env.example`); si faltan, el PDF lo dice.
+5. Al recibir el dinero: seleccionar la factura → **Registrar cobro de esta factura** (en compras: **Registrar pago al
+   proveedor de esta factura**). Tercero, moneda y saldo vienen precargados; se confirman fecha, importe, medio y el
+   importe a aplicar. Registrar y aplicar ocurren en **una transacción**: si algo falla no queda ninguno. Un
+   excedente queda como saldo a favor del cobro.
+6. Un cobro registrado antes sin factura (**Pagos → Registrar cobro o pago**) se aplica después con **Pagos →
+   Aplicar a factura**: las facturas candidatas se buscan en la base (no dependen del filtro de la pestaña) y, si no
+   hay, se explica por qué (por ejemplo, el tercero solo tiene facturas de compra).
+
+**Prueba manual sugerida (pendiente del grupo):** el recorrido anterior con un envío nuevo; un cobro parcial y otro
+por el saldo; ver el saldo en **Cuentas corrientes**; anular una factura con y sin refacturación.
 
 **Pruebas automáticas de este corte:** `tests/test_fase6_dominio.py` (sin base),
 `tests/test_fase6_comercial.py` (PostgreSQL real en transacción revertida), `tests/test_fase6_ui.py` (Qt

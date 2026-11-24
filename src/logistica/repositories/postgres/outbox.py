@@ -77,6 +77,20 @@ class OutboxRepository:
             for r in rows
         ]
 
+    def entrega_facturacion(self, tx: Session, envio_id: uuid.UUID) -> tuple[str, int, Any] | None:
+        """(estado, intentos, procesada_en) de la entrega FACTURACION del último ENVIO_ENTREGADO del envío, o
+        None si todavía no se confirmó la entrega. No devuelve `ultimo_error`: el detalle técnico va a logs."""
+        r = tx.execute(
+            text(
+                "SELECT x.estado, x.intentos, x.procesada_en FROM outbox_evento e"
+                " JOIN outbox_entrega x ON x.evento_id = e.id"
+                " WHERE e.agregado_id = :id AND x.destino = :destino"
+                " ORDER BY e.agregado_version DESC LIMIT 1"
+            ),
+            {"id": envio_id, "destino": FACTURACION},
+        ).one_or_none()
+        return (r.estado, r.intentos, r.procesada_en) if r else None
+
     def estados_mongo(self, tx: Session, evento_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
         """Lee únicamente el estado de sincronización de eventos ya consultados en Mongo."""
         if not evento_ids:

@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass
 
 from logistica.core.config import AppConfig
+from logistica.domain.comercial_dtos import EmisorDTO
 from logistica.domain.passwords import Hasher
 from logistica.repositories.connections import Connections
 from logistica.services.acceso_service import AccesoService
@@ -54,7 +55,12 @@ def crear_servicios(config: AppConfig, connections: Connections, instancia_id: u
     s = config.security
     hasher = Hasher(s.argon2_time_cost, s.argon2_memory_kib, s.argon2_parallelism)
     autorizador = Autorizador(connections)
-    comercial = ComercialService(connections, autorizador)
+    comercial = ComercialService(
+        connections,
+        autorizador,
+        config.reportes_dir / "comprobantes",
+        EmisorDTO(config.emisor_razon_social, config.emisor_identificacion, config.emisor_domicilio),
+    )
     sincronizacion = SincronizacionService(connections, facturacion=comercial.facturar_entrega)
     monitoreo = MonitoreoService(connections, autorizador)
     predicciones = PrediccionService(connections, autorizador)

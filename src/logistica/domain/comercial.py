@@ -432,3 +432,93 @@ class Cierre:
     @property
     def saldo_final(self) -> Decimal:
         return self.saldo_inicial + self.total_aumentos - self.total_disminuciones
+
+
+# --------------------------------------------------------------------------- situación comercial de un envío
+class SituacionComercial(StrEnum):
+    """Qué le falta a un envío para quedar facturado. Se DERIVA (no se guarda): estado del envío, cargos y la
+    entrega FACTURACION de la outbox."""
+
+    CANCELADO = "CANCELADO"  # envío cancelado: no se factura
+    SIN_PRECIO = "SIN_PRECIO"  # no hay cargos vigentes: falta definir qué se le cobra al cliente
+    A_FACTURAR_AL_ENTREGAR = "A_FACTURAR_AL_ENTREGAR"  # hay precio; se facturará al confirmar la entrega
+    FACTURACION_EN_CURSO = "FACTURACION_EN_CURSO"  # entregado; el proceso automático todavía no corrió
+    FACTURACION_FALLIDA = "FACTURACION_FALLIDA"  # el proceso automático agotó sus reintentos
+    PENDIENTE_DE_FACTURAR = "PENDIENTE_DE_FACTURAR"  # entregado con cargos pendientes: facturar a mano
+    FACTURADO = "FACTURADO"  # entregado y sin cargos pendientes, con al menos una factura vigente
+
+
+@dataclass(frozen=True)
+class EntregaFacturacion:
+    """Estado de la entrega FACTURACION del evento ENVIO_ENTREGADO (sin el texto técnico del error)."""
+
+    estado: str  # PENDIENTE | EN_PROCESO | COMPLETADA | FALLIDA
+    intentos: int
+    procesada_en: datetime | None
+
+
+_MENSAJES_SITUACION = {
+    SituacionComercial.CANCELADO: "Envío cancelado: no se factura.",
+    SituacionComercial.SIN_PRECIO: (
+        "Falta definir el precio de venta: el envío no tiene cargos vigentes. Sin cargos no se emite "
+        "ninguna factura (la entrega operativa no se bloquea por esto)."
+    ),
+    SituacionComercial.A_FACTURAR_AL_ENTREGAR: (
+        "Precio cargado. La factura de venta se emitirá sola cuando se confirme la entrega."
+    ),
+    SituacionComercial.FACTURACION_EN_CURSO: (
+        "Entrega confirmada: la facturación automática está en curso (corre a más tardar en un minuto con "
+        "una instancia interna abierta). También se puede emitir ahora con «Facturar pendientes»."
+    ),
+    SituacionComercial.FACTURACION_FALLIDA: (
+        "La facturación automática falló y agotó sus reintentos (el detalle técnico está en los logs). "
+        "Los cargos siguen pendientes: emití la factura con «Facturar pendientes»."
+    ),
+    SituacionComercial.PENDIENTE_DE_FACTURAR: (
+        "Hay cargos pendientes de facturar (por ejemplo, cargados después de la entrega o de reemplazo de "
+        "una factura anulada). Usá «Facturar pendientes» para emitir la factura de venta."
+    ),
+    SituacionComercial.FACTURADO: "Facturado: todos los cargos vigentes están en facturas de venta.",
+}
+
+
+def situacion_comercial(
+    estado_envio: str,
+    cargos_pendientes: int,
+    cargos_facturados: int,
+    entrega: EntregaFacturacion | None,
+) -> tuple[SituacionComercial, str]:
+    """Situación y mensaje para el usuario. `cargos_facturados` cuenta los FACTURADO (en factura vigente).
+
+    Un cargo CANCELADO no cuenta como precio. La facturación automática no se reintenta a mano desde acá: si
+    falló, los cargos siguen PENDIENTES y se facturan con la emisión manual (idempotente: un cargo no entra en
+    dos facturas)."""
+    if estado_envio == "CANCELADO":
+        s = SituacionComercial.CANCELADO
+    elif cargos_pendientes == 0 and cargos_facturados == 0:
+        s = SituacionComercial.SIN_PRECIO
+    elif estado_envio != "ENTREGADO":
+        s = SituacionComercial.A_FACTURAR_AL_ENTREGAR
+    elif cargos_pendientes == 0:
+        s = SituacionComercial.FACTURADO
+    elif entrega is not None and entrega.estado in ("PENDIENTE", "EN_PROCESO"):
+        s = SituacionComercial.FACTURACION_EN_CURSO
+    elif entrega is not None and entrega.estado == "FALLIDA":
+        s = SituacionComercial.FACTURACION_FALLIDA
+    else:
+        s = SituacionComercial.PENDIENTE_DE_FACTURAR
+    return s, _MENSAJES_SITUACION[s]
+
+
+def etiqueta_sentido_factura(sentido: str) -> str:
+    """Texto visible: deja claro de qué lado está la deuda y con qué se cancela."""
+    return "Venta · se cobra al cliente" if sentido == Sentido.VENTA else "Compra · se paga al proveedor"
+
+
+def etiqueta_sentido_pago(sentido: str) -> str:
+    return "Cobro · de cliente" if sentido == SentidoPago.COBRO else "Pago · a proveedor/operador"
+
+
+def formato_dinero(valor: Decimal | None) -> str:
+    """Formato único de importes en pantalla y PDF: miles con coma y 2 decimales (ej. 14,000.00)."""
+    return "" if valor is None else f"{valor:,.2f}"

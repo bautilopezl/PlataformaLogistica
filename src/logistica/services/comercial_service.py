@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from logistica.core.errors import BusinessRuleError, NotFoundError, ValidationError
@@ -23,11 +24,17 @@ from logistica.domain.comercial_dtos import (
     AplicacionDTO,
     CargoDTO,
     CierreDTO,
+    ComprobanteDTO,
+    ContraparteDTO,
     CuentaDTO,
+    EmisorDTO,
     FacturaDTO,
     PaginaMovimientos,
     PagoDTO,
+    ResumenComercialEnvioDTO,
 )
+from logistica.repositories.archivos import ArchivosComprobantes
+from logistica.repositories.postgres.outbox import OutboxRepository
 from logistica.domain.logistica import EstadoEnvio
 from logistica.domain.procesos import meses_a_cerrar
 from logistica.repositories.connections import Connections
@@ -50,9 +57,18 @@ log = logging.getLogger(__name__)
 
 
 class ComercialService:
-    def __init__(self, connections: Connections, autorizador: Autorizador):
+    def __init__(
+        self,
+        connections: Connections,
+        autorizador: Autorizador,
+        carpeta_comprobantes: Path | None = None,
+        emisor: EmisorDTO | None = None,
+    ):
         self._conn = connections
         self._aut = autorizador
+        self._outbox = OutboxRepository()
+        self._comprobantes = ArchivosComprobantes(carpeta_comprobantes) if carpeta_comprobantes else None
+        self._emisor = emisor or EmisorDTO()
         self._cargos = CargoRepository()
         self._facturas = FacturaRepository()
         self._pagos = PagoRepository()
@@ -108,6 +124,51 @@ class ComercialService:
         with self._aut.operacion(sesion_id, Permiso.CARGOS_GESTIONAR, Permiso.FACTURAS_EMITIR) as (tx, _p):
             self._envio(tx, envio_id)
             return self._cargos.de_envio(tx, envio_id)
+
+    # ======================================================================= contexto comercial del envío
+    def resumen_envio(self, sesion_id: uuid.UUID, envio_id: uuid.UUID) -> ResumenComercialEnvioDTO:
+        """Cliente, precio (cargos), situación de la facturación y facturas de VENTA del envío, en una lectura.
+        Solo consulta: no factura ni cobra nada."""
+        with self._aut.operacion(sesion_id, Permiso.CARGOS_GESTIONAR, Permiso.FACTURAS_EMITIR) as (tx, p):
+            envio = self._envio(tx, envio_id)
+            cargos = self._cargos.de_envio(tx, envio_id)
+            facturas = self._facturas.listar(
+                tx, alcance=_alcance(p), sentido=dc.Sentido.VENTA, envio_id=envio_id
+            )
+            situacion, mensaje, entrega = self._situacion(tx, envio, cargos)
+            return ResumenComercialEnvioDTO(
+                envio.id,
+                envio.codigo,
+                envio.estado,
+                envio.cliente_id,
+                envio.cliente_razon_social,
+                cargos,
+                facturas,
+                situacion,
+                mensaje,
+                entrega.estado if entrega else None,
+                entrega.intentos if entrega else 0,
+            )
+
+    def situacion_envio(self, sesion_id: uuid.UUID, envio_id: uuid.UUID) -> tuple[str, str]:
+        """Solo la situación (sin importes): la consulta también quien confirma la entrega (Operaciones), para
+        avisar si el envío quedó sin precio. No bloquea ni cambia la entrega."""
+        with self._aut.operacion(
+            sesion_id, Permiso.ENVIOS_PLANIFICAR, Permiso.CARGOS_GESTIONAR, Permiso.FACTURAS_EMITIR
+        ) as (tx, p):
+            if not p.es_interno:
+                raise NotFoundError(f"envío {envio_id}", user_message="El envío no existe.")
+            envio = self._envio(tx, envio_id)
+            situacion, mensaje, _ = self._situacion(tx, envio, self._cargos.de_envio(tx, envio_id))
+            return situacion, mensaje
+
+    def _situacion(self, tx: Any, envio: Any, cargos: list[CargoDTO]) -> tuple[str, str, Any]:
+        fila = self._outbox.entrega_facturacion(tx, envio.id)
+        entrega = dc.EntregaFacturacion(*fila) if fila else None
+        pendientes = sum(1 for c in cargos if c.estado == dc.EstadoCargo.PENDIENTE)
+        facturados = sum(1 for c in cargos if c.estado == dc.EstadoCargo.FACTURADO)
+        situacion, mensaje = dc.situacion_comercial(envio.estado, pendientes, facturados, entrega)
+        return situacion.value, mensaje, entrega
 
     # ======================================================================= facturación de ventas
     def facturar_entrega(
@@ -359,63 +420,69 @@ class ComercialService:
         """Cobro (de un cliente) o pago (a un operador/proveedor). Disminuye la cuenta en el momento: un pago
         sin aplicar es saldo a favor. Reintentar con la misma clave devuelve el mismo pago, sin duplicarlo."""
         with self._aut.operacion(sesion_id, Permiso.PAGOS_REGISTRAR) as (tx, p):
-            datos = datos.normalizado(ahora_pg(tx))
-            existente = self._pagos.por_clave(tx, clave_idempotencia)
-            if existente is not None:
-                return self._mismo_pago(existente, datos)
-            roles = (
-                {RolComercial.CLIENTE}
-                if datos.sentido == dc.SentidoPago.COBRO
-                else {RolComercial.OPERADOR, RolComercial.PROVEEDOR}
+            return self._registrar_pago_tx(tx, p, datos, clave_idempotencia)
+
+    def _registrar_pago_tx(
+        self, tx: Any, p: Principal, datos: dc.PagoDatos, clave_idempotencia: uuid.UUID
+    ) -> PagoDTO:
+        """Cuerpo de `registrar_pago` dentro de una transacción abierta (también lo usa `cobrar_factura`)."""
+        datos = datos.normalizado(ahora_pg(tx))
+        existente = self._pagos.por_clave(tx, clave_idempotencia)
+        if existente is not None:
+            return self._mismo_pago(existente, datos)
+        roles = (
+            {RolComercial.CLIENTE}
+            if datos.sentido == dc.SentidoPago.COBRO
+            else {RolComercial.OPERADOR, RolComercial.PROVEEDOR}
+        )
+        tercero = self._terceros.obtener(tx, datos.tercero_id)
+        if tercero is None or not tercero.activo or not roles & set(tercero.roles_comerciales):
+            raise BusinessRuleError(
+                "tercero sin rol",
+                user_message=(
+                    "Un cobro es de un cliente activo."
+                    if datos.sentido == dc.SentidoPago.COBRO
+                    else "Un pago es a un operador o proveedor activo."
+                ),
             )
-            tercero = self._terceros.obtener(tx, datos.tercero_id)
-            if tercero is None or not tercero.activo or not roles & set(tercero.roles_comerciales):
-                raise BusinessRuleError(
-                    "tercero sin rol",
-                    user_message=(
-                        "Un cobro es de un cliente activo."
-                        if datos.sentido == dc.SentidoPago.COBRO
-                        else "Un pago es a un operador o proveedor activo."
-                    ),
-                )
-            cuenta = self._cuentas.obtener_o_crear(
-                tx, datos.tercero_id, dc.naturaleza_pago(datos.sentido), datos.moneda_codigo
+        cuenta = self._cuentas.obtener_o_crear(
+            tx, datos.tercero_id, dc.naturaleza_pago(datos.sentido), datos.moneda_codigo
+        )
+        ultimo = self._cuentas.ultimo_cierre(tx, cuenta)
+        if ultimo is not None and dc.periodo_de(datos.fecha) <= ultimo:
+            raise BusinessRuleError(
+                "período cerrado", user_message="La fecha del pago cae en un período ya cerrado."
             )
-            ultimo = self._cuentas.ultimo_cierre(tx, cuenta)
-            if ultimo is not None and dc.periodo_de(datos.fecha) <= ultimo:
-                raise BusinessRuleError(
-                    "período cerrado", user_message="La fecha del pago cae en un período ya cerrado."
-                )
-            pago_id = uuid.uuid4()
-            if not self._pagos.crear(
-                tx,
-                pago_id,
-                tercero_id=datos.tercero_id,
-                sentido=datos.sentido,
-                fecha=datos.fecha,
-                monto=datos.monto,
-                moneda=datos.moneda_codigo,
-                medio=datos.medio,
-                referencia=datos.referencia,
-                usuario_id=p.usuario_id,
-                clave=clave_idempotencia,
-            ):
-                # Otra transacción registró la misma clave mientras tanto: devolver ese pago.
-                return self._mismo_pago(self._pagos.por_clave(tx, clave_idempotencia), datos)
-            self._cuentas.registrar_movimiento(
-                tx,
-                cuenta_id=cuenta,
-                sentido=dc.DISMINUYE,
-                importe=datos.monto,
-                pago_id=pago_id,
-                clave_origen=f"pago:{pago_id}",
-                descripcion=("Cobro" if datos.sentido == dc.SentidoPago.COBRO else "Pago")
-                + f" ({datos.medio})",
-            )
-            auditoria.registrar(
-                tx, "registrar_pago", p, entidad="pago", entidad_id=pago_id, sentido=datos.sentido
-            )
-            return self._pagos.obtener(tx, pago_id)
+        pago_id = uuid.uuid4()
+        if not self._pagos.crear(
+            tx,
+            pago_id,
+            tercero_id=datos.tercero_id,
+            sentido=datos.sentido,
+            fecha=datos.fecha,
+            monto=datos.monto,
+            moneda=datos.moneda_codigo,
+            medio=datos.medio,
+            referencia=datos.referencia,
+            usuario_id=p.usuario_id,
+            clave=clave_idempotencia,
+        ):
+            # Otra transacción registró la misma clave mientras tanto: devolver ese pago.
+            return self._mismo_pago(self._pagos.por_clave(tx, clave_idempotencia), datos)
+        self._cuentas.registrar_movimiento(
+            tx,
+            cuenta_id=cuenta,
+            sentido=dc.DISMINUYE,
+            importe=datos.monto,
+            pago_id=pago_id,
+            clave_origen=f"pago:{pago_id}",
+            descripcion=("Cobro" if datos.sentido == dc.SentidoPago.COBRO else "Pago")
+            + f" ({datos.medio})",
+        )
+        auditoria.registrar(
+            tx, "registrar_pago", p, entidad="pago", entidad_id=pago_id, sentido=datos.sentido
+        )
+        return self._pagos.obtener(tx, pago_id)
 
     @staticmethod
     def _mismo_pago(existente: PagoDTO, datos: dc.PagoDatos) -> PagoDTO:
@@ -447,25 +514,106 @@ class ComercialService:
         pueden superar el disponible del pago ni el saldo de la factura. No mueve la cuenta (el pago ya la
         movió)."""
         with self._aut.operacion(sesion_id, Permiso.PAGOS_APLICAR) as (tx, p):
-            monto = dc.decimal_de(monto, "el monto", decimales=2)
-            if self._pagos.obtener(tx, pago_id, bloquear=True) is None:
-                raise NotFoundError(f"pago {pago_id}", user_message="El pago no existe.")
-            if self._facturas.obtener(tx, factura_id, bloquear=True) is None:
+            return self._aplicar_tx(tx, p, pago_id, factura_id, monto)
+
+    def _aplicar_tx(
+        self, tx: Any, p: Principal, pago_id: uuid.UUID, factura_id: uuid.UUID, monto: Any
+    ) -> AplicacionDTO:
+        """Cuerpo de `aplicar_pago` dentro de una transacción abierta (también lo usa `cobrar_factura`)."""
+        monto = dc.decimal_de(monto, "el monto", decimales=2)
+        if self._pagos.obtener(tx, pago_id, bloquear=True) is None:
+            raise NotFoundError(f"pago {pago_id}", user_message="El pago no existe.")
+        if self._facturas.obtener(tx, factura_id, bloquear=True) is None:
+            raise NotFoundError(f"factura {factura_id}", user_message="La factura no existe.")
+        dc.exigir_aplicable(self._pagos.saldo(tx, pago_id), self._facturas.saldo(tx, factura_id), monto)
+        aplicacion_id = uuid.uuid4()
+        self._aplicaciones.crear(tx, aplicacion_id, pago_id, factura_id, monto)
+        auditoria.registrar(
+            tx,
+            "aplicar_pago",
+            p,
+            entidad="pago_aplicacion",
+            entidad_id=aplicacion_id,
+            pago_id=str(pago_id),
+            factura_id=str(factura_id),
+            monto=str(monto),
+        )
+        return self._aplicaciones.obtener(tx, aplicacion_id)
+
+    def cobrar_factura(
+        self,
+        sesion_id: uuid.UUID,
+        factura_id: uuid.UUID,
+        *,
+        fecha: datetime,
+        monto: Any,
+        medio: str,
+        referencia: str | None,
+        monto_aplicado: Any,
+        clave_idempotencia: uuid.UUID,
+    ) -> tuple[PagoDTO, AplicacionDTO | None]:
+        """Registrar el dinero recibido (o pagado) Y aplicarlo a ESTA factura, en UNA transacción PostgreSQL.
+
+        Tercero, moneda y sentido salen de la factura (venta → cobro de cliente; compra → pago al proveedor);
+        importe, fecha y medio los confirma el usuario. Mismas reglas que las dos operaciones por separado:
+        exige ambos permisos, no aplica más que el saldo de la factura ni más que lo recibido (el excedente
+        queda como saldo a favor del pago) y respeta los períodos cerrados. Si algo falla no queda NI el pago
+        NI la aplicación. Orden de bloqueo: factura → cuenta → pago (nuevo), compatible con el habitual
+        pago → factura → cuenta. Reintentar con la misma clave no duplica: devuelve el pago ya registrado y
+        su aplicación vigente a esta factura."""
+        with self._aut.operacion(sesion_id, Permiso.PAGOS_REGISTRAR) as (tx, p):
+            self._aut.exigir(p, Permiso.PAGOS_APLICAR)
+            factura = self._facturas.obtener(tx, factura_id, bloquear=True)
+            if factura is None or not _visible(
+                _alcance(p), factura.tercero_id, dc.naturaleza_factura(factura.sentido)
+            ):
                 raise NotFoundError(f"factura {factura_id}", user_message="La factura no existe.")
-            dc.exigir_aplicable(self._pagos.saldo(tx, pago_id), self._facturas.saldo(tx, factura_id), monto)
-            aplicacion_id = uuid.uuid4()
-            self._aplicaciones.crear(tx, aplicacion_id, pago_id, factura_id, monto)
-            auditoria.registrar(
-                tx,
-                "aplicar_pago",
-                p,
-                entidad="pago_aplicacion",
-                entidad_id=aplicacion_id,
-                pago_id=str(pago_id),
-                factura_id=str(factura_id),
-                monto=str(monto),
+            datos = dc.PagoDatos(
+                factura.tercero_id,
+                dc.sentido_pago_para(factura.sentido),
+                fecha,
+                monto,
+                factura.moneda_codigo,
+                medio,
+                referencia,
             )
-            return self._aplicaciones.obtener(tx, aplicacion_id)
+            previo = self._pagos.por_clave(tx, clave_idempotencia)
+            if previo is not None:  # reintento de una operación que ya se confirmó
+                pago = self._mismo_pago(previo, datos.normalizado(ahora_pg(tx)))
+                vigentes = [
+                    a
+                    for a in self._aplicaciones.de_pago(tx, pago.id)
+                    if a.factura_id == factura_id and a.anulada_en is None
+                ]
+                return pago, (vigentes[0] if vigentes else None)
+            if factura.estado != dc.EstadoFactura.EMITIDA:
+                raise BusinessRuleError("factura no emitida", user_message="La factura no está emitida.")
+            if factura.pendiente <= 0:
+                raise BusinessRuleError("sin saldo", user_message="La factura no tiene saldo pendiente.")
+            pago = self._registrar_pago_tx(tx, p, datos, clave_idempotencia)
+            aplicacion = self._aplicar_tx(tx, p, pago.id, factura_id, monto_aplicado)
+            return self._pagos.obtener(tx, pago.id), aplicacion
+
+    def facturas_aplicables(
+        self, sesion_id: uuid.UUID, pago_id: uuid.UUID
+    ) -> tuple[list[FacturaDTO], list[FacturaDTO]]:
+        """Facturas a las que se puede aplicar el pago (mismo tercero, moneda y sentido; emitidas con saldo),
+        consultadas en la base: no dependen del filtro de la pantalla. Devuelve además las del OTRO sentido del
+        mismo tercero con saldo, para explicar por qué no sirven (un cobro no cancela una factura de compra)."""
+        with self._aut.operacion(sesion_id, Permiso.PAGOS_APLICAR) as (tx, p):
+            pago = self._pagos.obtener(tx, pago_id)
+            if pago is None or not _visible(_alcance(p), pago.tercero_id, dc.naturaleza_pago(pago.sentido)):
+                raise NotFoundError(f"pago {pago_id}", user_message="El pago no existe.")
+            sentido = dc.Sentido.VENTA if pago.sentido == dc.SentidoPago.COBRO else dc.Sentido.COMPRA
+            con_saldo = [
+                f
+                for f in self._facturas.listar(
+                    tx, alcance=_alcance(p), tercero_id=pago.tercero_id, estado=dc.EstadoFactura.EMITIDA
+                )
+                if f.pendiente > 0
+            ]
+            aplicables = [f for f in con_saldo if f.sentido == sentido and f.moneda_codigo == pago.moneda_codigo]
+            return aplicables, [f for f in con_saldo if f.sentido != sentido]
 
     def anular_aplicacion(self, sesion_id: uuid.UUID, aplicacion_id: uuid.UUID, motivo: str) -> AplicacionDTO:
         with self._aut.operacion(sesion_id, Permiso.PAGOS_APLICAR) as (tx, p):
@@ -616,6 +764,59 @@ class ComercialService:
             if f is None or not _visible(_alcance(p), f.tercero_id, dc.naturaleza_factura(f.sentido)):
                 raise NotFoundError(f"factura {factura_id}", user_message="La factura no existe.")
             return f
+
+    def comprobante(self, sesion_id: uuid.UUID, factura_id: uuid.UUID) -> ComprobanteDTO:
+        """Detalle completo de una factura: renglones, importes PERSISTIDOS, contraparte, envíos y aplicaciones,
+        con el estado de cobranza a la fecha de la consulta. Mismo permiso y alcance que `factura`."""
+        with self._aut.operacion(sesion_id, Permiso.CUENTAS_CONSULTAR, Permiso.FACTURAS_EMITIR) as (tx, p):
+            return self._comprobante(tx, p, factura_id)
+
+    def _comprobante(self, tx: Any, p: Principal, factura_id: uuid.UUID) -> ComprobanteDTO:
+        f = self._facturas.obtener(tx, factura_id, con_renglones=True)
+        if f is None or not _visible(_alcance(p), f.tercero_id, dc.naturaleza_factura(f.sentido)):
+            raise NotFoundError(f"factura {factura_id}", user_message="La factura no existe.")
+        t = self._terceros.obtener(tx, f.tercero_id)
+        contraparte = ContraparteDTO(
+            t.razon_social, t.pais_codigo, t.tipo_identificacion, t.numero_identificacion, t.direccion, t.email
+        )
+        envios = sorted({r.envio_id for r in f.renglones if r.envio_id is not None}, key=str)
+        return ComprobanteDTO(
+            f,
+            contraparte,
+            self._emisor,
+            self._facturas.codigos_envio(tx, envios),
+            self._aplicaciones.de_factura(tx, factura_id),
+            ahora_pg(tx),
+            p.email,
+        )
+
+    def exportar_comprobante(self, sesion_id: uuid.UUID, factura_id: uuid.UUID) -> Path:
+        """Genera el PDF (documento académico/interno, SIN validez fiscal) y devuelve su ruta local. Lee en una
+        transacción corta, escribe el archivo FUERA de ella (repositorio de archivos) y audita la exportación
+        revalidando la sesión: si eso falla, el archivo no queda."""
+        if self._comprobantes is None:
+            raise BusinessRuleError(
+                "sin carpeta de comprobantes", user_message="No hay carpeta configurada para los comprobantes."
+            )
+        with self._aut.operacion(sesion_id, Permiso.CUENTAS_CONSULTAR, Permiso.FACTURAS_EMITIR) as (tx, p):
+            comprobante = self._comprobante(tx, p, factura_id)
+        try:
+            ruta = self._comprobantes.guardar(comprobante)
+        except OSError as exc:
+            log.exception("No se pudo escribir el comprobante de la factura %s", factura_id)
+            raise BusinessRuleError(
+                f"comprobante {factura_id}: {type(exc).__name__}",
+                user_message="No se pudo guardar el PDF del comprobante. Ver logs.",
+            ) from exc
+        try:
+            with self._aut.operacion(sesion_id, Permiso.CUENTAS_CONSULTAR, Permiso.FACTURAS_EMITIR) as (tx, p):
+                auditoria.registrar(
+                    tx, "exportar_comprobante", p, entidad="factura", entidad_id=factura_id, archivo=ruta.name
+                )
+        except Exception:
+            ruta.unlink(missing_ok=True)
+            raise
+        return ruta
 
     def pagos(self, sesion_id: uuid.UUID, *, tercero_id: uuid.UUID | None = None) -> list[PagoDTO]:
         with self._aut.operacion(sesion_id, Permiso.CUENTAS_CONSULTAR, Permiso.PAGOS_REGISTRAR) as (tx, p):

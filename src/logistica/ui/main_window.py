@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
                     servicios.terceros,
                     principal.sesion_id,
                     principal.permisos,
+                    comercial=servicios.comercial,
                 ),
                 "Envíos",
             )
