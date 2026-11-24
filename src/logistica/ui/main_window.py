@@ -41,6 +41,7 @@ from logistica.ui.chat_view import ChatView
 from logistica.ui.comercial_view import ComercialView
 from logistica.ui.reportes_view import ReportesView
 from logistica.ui.envios_view import EnviosView
+from logistica.ui.ficha_cliente import ServiciosFicha
 from logistica.ui.monitoreo_view import MonitoreoView
 from logistica.ui.trazabilidad_view import TrazabilidadView
 from logistica.ui.worker import WorkerPool
@@ -127,6 +128,10 @@ class MainWindow(QMainWindow):
                     servicios.terceros,
                     principal.sesion_id,
                     principal.tiene_permiso(Permiso.TERCEROS_GESTIONAR),
+                    ficha=ServiciosFicha(
+                        servicios.terceros, servicios.envios, servicios.catalogo, servicios.comercial
+                    ),
+                    permisos=principal.permisos,
                 ),
                 "Terceros",
             )

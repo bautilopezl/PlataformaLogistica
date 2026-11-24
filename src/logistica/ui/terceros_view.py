@@ -1,4 +1,8 @@
-"""Pestaña "Terceros": ABM de clientes, proveedores y operadores con sus roles comerciales."""
+"""Pestaña "Terceros": ABM de clientes, proveedores y operadores con sus roles comerciales.
+
+«Ver ficha del cliente» abre la ficha unificada (ui/ficha_cliente.py) de un tercero con rol CLIENTE. Cada sección
+de la ficha exige su propio permiso en el servicio: consultar Terceros no concede acceso comercial.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ from PySide6.QtWidgets import (
 from logistica.core.errors import ValidationError
 from logistica.domain.acceso import RolComercial, TerceroDatos, TerceroDTO
 from logistica.services.tercero_service import TerceroService
+from logistica.ui.ficha_cliente import ServiciosFicha, abrir_ficha_cliente, es_cliente
 from logistica.ui.widgets import VistaBase, clave_seleccionada, llenar_tabla, si_no, tabla
 
 COLUMNAS = ("Razón social", "País", "Identificación", "Roles comerciales", "Email", "Activo")
@@ -34,10 +39,13 @@ class TercerosView(VistaBase):
         sesion_id: uuid.UUID,
         puede_gestionar: bool,
         parent: QWidget | None = None,
+        ficha: ServiciosFicha | None = None,
+        permisos: frozenset[str] = frozenset(),
     ):
         super().__init__(sesion_id, parent)
         self._servicio = servicio
         self._puede_gestionar = puede_gestionar  # solo cambia qué botones se ven: el servicio igual valida
+        self._ficha, self._permisos = ficha, permisos  # ficha del cliente (opcional)
         self._terceros: dict[uuid.UUID, TerceroDTO] = {}
 
         self.buscar = QLineEdit()
@@ -52,7 +60,8 @@ class TercerosView(VistaBase):
         self.boton_buscar.clicked.connect(self.recargar)
         self.tabla = tabla(COLUMNAS)
         self.tabla.itemSelectionChanged.connect(self.actualizar_botones)
-        self.tabla.doubleClicked.connect(self.editar)
+        # Doble clic: quien gestiona sigue editando (acción existente); quien solo consulta abre la ficha.
+        self.tabla.doubleClicked.connect(self.editar if puede_gestionar else self.ver_ficha)
 
         self.boton_nuevo = QPushButton("Nuevo")
         self.boton_editar = QPushButton("Editar")
@@ -60,6 +69,9 @@ class TercerosView(VistaBase):
         self.boton_nuevo.clicked.connect(self.nuevo)
         self.boton_editar.clicked.connect(self.editar)
         self.boton_activo.clicked.connect(self.alternar_activo)
+        self.boton_ficha = QPushButton("Ver ficha del cliente")
+        self.boton_ficha.clicked.connect(self.ver_ficha)
+        self.boton_ficha.setVisible(ficha is not None)
 
         filtros = QHBoxLayout()
         for w in (self.buscar, self.rol, self.inactivos, self.boton_buscar):
@@ -68,6 +80,7 @@ class TercerosView(VistaBase):
         for w in (self.boton_nuevo, self.boton_editar, self.boton_activo):
             w.setVisible(puede_gestionar)
             acciones.addWidget(w)
+        acciones.addWidget(self.boton_ficha)
         acciones.addStretch()
         layout = QVBoxLayout(self)
         layout.addLayout(filtros)
@@ -138,9 +151,18 @@ class TercerosView(VistaBase):
                 self._servicio.set_activo, lambda _t: self.recargar(), self.sesion_id, t.id, not t.activo
             )
 
+    def ver_ficha(self) -> None:
+        """Ficha unificada del cliente elegido (por su id, no por la fila)."""
+        t = self.seleccionado()
+        if self._ficha is None or not es_cliente(t):
+            return
+        abrir_ficha_cliente(self, self._ficha, self.sesion_id, t, self._permisos, self.sesion_vencida.emit)
+
     def actualizar_botones(self) -> None:
         t = self.seleccionado()
         libre = not self.ocupado()
+        self.boton_ficha.setEnabled(libre and self._ficha is not None and es_cliente(t))
+        self.boton_ficha.setToolTip("" if t is None or es_cliente(t) else "Solo para terceros con rol CLIENTE.")
         self.boton_buscar.setEnabled(libre)
         self.boton_nuevo.setEnabled(libre)
         self.boton_editar.setEnabled(libre and t is not None)

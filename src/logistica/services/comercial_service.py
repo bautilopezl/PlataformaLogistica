@@ -719,9 +719,16 @@ class ComercialService:
         return creados
 
     # ======================================================================= consultas (con alcance)
-    def cuentas(self, sesion_id: uuid.UUID, *, tercero_id: uuid.UUID | None = None) -> list[CuentaDTO]:
+    def cuentas(
+        self,
+        sesion_id: uuid.UUID,
+        *,
+        tercero_id: uuid.UUID | None = None,
+        naturaleza: str | None = None,
+    ) -> list[CuentaDTO]:
+        """`tercero_id`/`naturaleza` son filtros exactos que se SUMAN al alcance del usuario."""
         with self._aut.operacion(sesion_id, Permiso.CUENTAS_CONSULTAR) as (tx, p):
-            return self._cuentas.listar(tx, alcance=_alcance(p), tercero_id=tercero_id)
+            return self._cuentas.listar(tx, alcance=_alcance(p), tercero_id=tercero_id, naturaleza=naturaleza)
 
     def movimientos(
         self,
@@ -752,10 +759,16 @@ class ComercialService:
         sentido: str | None = None,
         estado: str | None = None,
         envio_id: uuid.UUID | None = None,
+        tercero_id: uuid.UUID | None = None,
     ) -> list[FacturaDTO]:
         with self._aut.operacion(sesion_id, Permiso.CUENTAS_CONSULTAR, Permiso.FACTURAS_EMITIR) as (tx, p):
             return self._facturas.listar(
-                tx, alcance=_alcance(p), sentido=sentido, estado=estado, envio_id=envio_id
+                tx,
+                alcance=_alcance(p),
+                sentido=sentido,
+                estado=estado,
+                envio_id=envio_id,
+                tercero_id=tercero_id,
             )
 
     def factura(self, sesion_id: uuid.UUID, factura_id: uuid.UUID) -> FacturaDTO:
@@ -818,9 +831,15 @@ class ComercialService:
             raise
         return ruta
 
-    def pagos(self, sesion_id: uuid.UUID, *, tercero_id: uuid.UUID | None = None) -> list[PagoDTO]:
+    def pagos(
+        self,
+        sesion_id: uuid.UUID,
+        *,
+        tercero_id: uuid.UUID | None = None,
+        sentido: str | None = None,
+    ) -> list[PagoDTO]:
         with self._aut.operacion(sesion_id, Permiso.CUENTAS_CONSULTAR, Permiso.PAGOS_REGISTRAR) as (tx, p):
-            return self._pagos.listar(tx, alcance=_alcance(p), tercero_id=tercero_id)
+            return self._pagos.listar(tx, alcance=_alcance(p), tercero_id=tercero_id, sentido=sentido)
 
     def aplicaciones(
         self, sesion_id: uuid.UUID, *, pago_id: uuid.UUID | None = None, factura_id: uuid.UUID | None = None

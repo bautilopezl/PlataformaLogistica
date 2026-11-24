@@ -108,14 +108,17 @@ class EnvioRepository:
         alcance: AlcanceConsulta,
         estado: str | None,
         texto: str | None,
+        cliente_id: uuid.UUID | None = None,
         limite: int = 500,
     ) -> list[EnvioDTO]:
+        """`cliente_id` es un filtro EXACTO adicional (ficha del cliente): se suma al alcance, no lo reemplaza."""
         rows = tx.execute(
             text(
                 _SELECT_ENVIO
                 + " WHERE"
                 + _ALCANCE
-                + " AND (CAST(:estado AS text) IS NULL OR e.estado = :estado)"
+                + " AND (CAST(:cliente_exacto AS uuid) IS NULL OR e.cliente_id = :cliente_exacto)"
+                " AND (CAST(:estado AS text) IS NULL OR e.estado = :estado)"
                 " AND (CAST(:texto AS text) IS NULL OR e.codigo ILIKE '%' || :texto || '%' ESCAPE '\\'"
                 "      OR c.razon_social ILIKE '%' || :texto || '%' ESCAPE '\\')"
                 " ORDER BY e.creado_en DESC, e.codigo LIMIT :limite"
@@ -123,6 +126,7 @@ class EnvioRepository:
             {
                 "cliente": alcance.cliente_id,
                 "operador": alcance.operador_id,
+                "cliente_exacto": cliente_id,
                 "estado": estado,
                 "texto": _like(texto),
                 "limite": limite,

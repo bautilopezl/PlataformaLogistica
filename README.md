@@ -163,6 +163,26 @@ recibirla de un operador/proveedor) se cancela con un **pago**. Un cobro nunca s
    Aplicar a factura**: las facturas candidatas se buscan en la base (no dependen del filtro de la pestaña) y, si no
    hay, se explica por qué (por ejemplo, el tercero solo tiene facturas de compra).
 
+**Ficha del cliente (desde Terceros).** **Terceros** → seleccionar una empresa con rol CLIENTE → **Ver ficha del
+cliente** (quien solo consulta Terceros también puede hacer doble clic; quien gestiona sigue editando con doble
+clic). Muestra únicamente el circuito **como cliente**, aunque la empresa también sea operador: sin facturas de
+compra, pagos a proveedores ni cuentas por pagar. Cada pestaña se carga al abrirla, en un trabajador, con
+**Recargar pestaña**:
+- **Datos generales**: razón social, identificación, país, contacto, domicilio, estado y roles ("Sin informar" si
+  falta). Permiso: el de consulta de Terceros.
+- **Envíos** (filtro por estado; **Abrir envío** abre el detalle habitual con sus controles). Permiso
+  `envios.consultar`.
+- **Facturas de venta** (anuladas en gris; **Ver factura / PDF** abre el detalle comercial). Permiso
+  `cuentas.consultar` o `facturas.emitir`.
+- **Cobros** (solo COBRO; **Ver aplicaciones** con factura e importe, si hay `cuentas.consultar` o `pagos.aplicar`).
+  Permiso `cuentas.consultar` o `pagos.registrar`. Consultar no crea ni aplica cobros.
+- **Cuenta corriente**: cuentas POR COBRAR, una por moneda (nunca se suman USD y ARS), con el saldo que calcula el
+  servicio comercial y los movimientos de a 50 (**Más movimientos**). Permiso `cuentas.consultar`.
+
+Una pestaña sin permiso queda deshabilitada; poder consultar Terceros no da acceso comercial y cada servicio vuelve a
+validar sesión, permiso y alcance. Los filtros por cliente se aplican en la consulta a la base y se suman al alcance
+del usuario (no lo amplían).
+
 **Prueba manual sugerida (pendiente del grupo):** el recorrido anterior con un envío nuevo; un cobro parcial y otro
 por el saldo; ver el saldo en **Cuentas corrientes**; anular una factura con y sin refacturación.
 

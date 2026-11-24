@@ -82,12 +82,22 @@ class EnvioService:
 
     # ======================================================================= consultas
     def listar(
-        self, sesion_id: uuid.UUID, *, estado: str | None = None, texto: str | None = None
+        self,
+        sesion_id: uuid.UUID,
+        *,
+        estado: str | None = None,
+        texto: str | None = None,
+        cliente_id: uuid.UUID | None = None,
     ) -> list[EnvioDTO]:
-        """Internos: todos. Cliente: sus envíos. Operador: envíos con al menos un tramo de su empresa."""
+        """Internos: todos. Cliente: sus envíos. Operador: envíos con al menos un tramo de su empresa.
+        `cliente_id` filtra además por cliente exacto (ficha del cliente) sin ampliar el alcance."""
         with self._aut.operacion(sesion_id, Permiso.ENVIOS_CONSULTAR) as (tx, p):
             return self._envios.listar(
-                tx, alcance=_alcance(p), estado=estado or None, texto=(texto or "").strip() or None
+                tx,
+                alcance=_alcance(p),
+                estado=estado or None,
+                texto=(texto or "").strip() or None,
+                cliente_id=cliente_id,
             )
 
     def obtener(self, sesion_id: uuid.UUID, envio_id: uuid.UUID) -> EnvioDetalleDTO:

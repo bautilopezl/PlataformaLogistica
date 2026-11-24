@@ -395,6 +395,7 @@ class PagoRepository:
         *,
         alcance: AlcanceComercial,
         tercero_id: uuid.UUID | None = None,
+        sentido: str | None = None,
         limite: int = 500,
     ) -> list[PagoDTO]:
         rows = tx.execute(
@@ -402,9 +403,16 @@ class PagoRepository:
                 _SELECT_PAGO
                 + " WHERE (CAST(:alc AS uuid) IS NULL OR p.tercero_id = :alc) AND p.sentido = ANY(:sentidos)"
                 " AND (CAST(:t AS uuid) IS NULL OR p.tercero_id = :t)"
+                " AND (CAST(:s AS varchar) IS NULL OR p.sentido = :s)"
                 " ORDER BY p.fecha DESC, p.id LIMIT :limite"
             ),
-            {"alc": alcance.tercero_id, "sentidos": alcance.sentidos_pago, "t": tercero_id, "limite": limite},
+            {
+                "alc": alcance.tercero_id,
+                "sentidos": alcance.sentidos_pago,
+                "t": tercero_id,
+                "s": sentido,
+                "limite": limite,
+            },
         )
         return [PagoDTO(*r) for r in rows]
 
@@ -511,16 +519,22 @@ class CuentaRepository:
         return CuentaDTO(*r) if r else None
 
     def listar(
-        self, tx: Session, *, alcance: AlcanceComercial, tercero_id: uuid.UUID | None = None
+        self,
+        tx: Session,
+        *,
+        alcance: AlcanceComercial,
+        tercero_id: uuid.UUID | None = None,
+        naturaleza: str | None = None,
     ) -> list[CuentaDTO]:
         rows = tx.execute(
             text(
                 _SELECT_CUENTA
                 + " WHERE (CAST(:alc AS uuid) IS NULL OR c.tercero_id = :alc) AND c.naturaleza = ANY(:nat)"
                 " AND (CAST(:t AS uuid) IS NULL OR c.tercero_id = :t)"
+                " AND (CAST(:n AS varchar) IS NULL OR c.naturaleza = :n)"
                 " ORDER BY t.razon_social, c.naturaleza, c.moneda_codigo"
             ),
-            {"alc": alcance.tercero_id, "nat": sorted(alcance.naturalezas), "t": tercero_id},
+            {"alc": alcance.tercero_id, "nat": sorted(alcance.naturalezas), "t": tercero_id, "n": naturaleza},
         )
         return [CuentaDTO(*r) for r in rows]
 
